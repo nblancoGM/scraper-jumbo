@@ -3,7 +3,7 @@ name: Scrape Jumbo y actualizar Google Sheets
 on:
   workflow_dispatch: {}
   schedule:
-    # Todos los lunes a las 15:00 UTC == 11:00 en Chile (invierno, UTC-4)
+    # Todos los lunes a las 15:00 UTC (equivale a ~11:00 en Chile en invierno)
     - cron: "0 15 * * 1"
 
 jobs:
@@ -21,14 +21,17 @@ jobs:
 
       - name: Instalar Chromium & Chromedriver
         run: |
+          set -e
           sudo apt-get update
-          # Intentar instalar chromium y chromedriver (nombres varían por distro)
-          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
-          sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver
-          which chromium || true
-          which chromium-browser || true
-          which chromedriver || true
-          ls -l /usr/bin/chrom* || true
+          # Chromium suele instalarse como snap en ubuntu-latest
+          sudo apt-get install -y chromium-browser || true
+          # Chromedriver: el paquete varía según imagen
+          sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver || true
+          echo "which chromium:"; which chromium || true
+          echo "which chromium-browser:"; which chromium-browser || true
+          echo "which chromedriver:"; which chromedriver || true
+          echo "ls /usr/bin/chrom*:"; ls -l /usr/bin/chrom* || true
+          echo "ls /snap/bin/chrom*:"; ls -l /snap/bin/chrom* || true
 
       - name: Instalar dependencias
         run: |
@@ -39,5 +42,6 @@ jobs:
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS }}
+          CHROME_BIN: /snap/bin/chromium
         run: |
           python scraper.py
