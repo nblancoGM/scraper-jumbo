@@ -18,6 +18,7 @@ import re
 import time
 import json
 import random
+import shutil
 from typing import Optional, Tuple, List, Dict, Any
 from datetime import datetime
 from dateutil import tz
@@ -130,16 +131,52 @@ def precio_por_kg(precio: Optional[int], peso_gr: Optional[float]) -> Optional[i
 # Selenium (Chromium headless)
 # =========================
 
-def _chrome_binary_path() -> str:
-    # runners ubuntu suelen tener estos binarios
-    for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
+def _chrome_binary_path() -> Optional[str]:
+    """
+    Detecta el binario de Chrome/Chromium.
+    Prioriza variable CHROME_BIN (puede venir del workflow).
+    Luego prueba rutas comunes, incluyendo snap.
+    """
+    env_bin = os.getenv("CHROME_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+
+    candidates = [
+        "/snap/bin/chromium",          # snap (Ubuntu 24.04 GH runner)
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ]
+    for p in candidates:
         if os.path.exists(p):
             return p
-    return "/usr/bin/chromium"
+
+    # si no hay coincidencias, devolvemos None (no forzar una ruta inexistente)
+    return None
+
+def _chromedriver_path() -> Optional[str]:
+    # Usa el que esté en PATH si existe
+    path = shutil.which("chromedriver")
+    if path:
+        return path
+    # rutas típicas
+    candidates = [
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+        "/snap/bin/chromedriver",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None  # dejar que Selenium Manager intente resolver
 
 def build_browser() -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
-    options.binary_location = _chrome_binary_path()
+    bin_path = _chrome_binary_path()
+    if bin_path:
+        options.binary_location = bin_path
+
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
@@ -150,8 +187,15 @@ def build_browser() -> webdriver.Chrome:
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    service = Service(executable_path="/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=options)
+
+    drv_path = _chromedriver_path()
+    if drv_path:
+        service = Service(executable_path=drv_path)
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        # fallback: deja que Selenium Manager resuelva (requiere salida a internet)
+        driver = webdriver.Chrome(options=options)
+
     driver.set_page_load_timeout(25)
     return driver
 
@@ -258,7 +302,6 @@ def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
 
     # Leer valores actuales de la columna I para no pisar cuando None
     col_vals = ws_pweb.col_values(COL_JUMBO_KG_PWEB)
-    # asegurar largo
     max_row = ws_pweb.row_count
     while len(col_vals) < max_row:
         col_vals.append("")
@@ -266,62 +309,42 @@ def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
     updates = []
     for sku, nuevo in dict_sku_precio_kg.items():
         row = sku_to_row.get(sku)
-        if not row:
-            continue  # SKU no está en P-web, se ignora
-        if row == 1:
-            continue  # header
+        if not row or row == 1:
+            continue
         if nuevo is None or nuevo == "":
-            continue  # no pisa si no hay valor
-        # Escribe el nuevo valor en col I
-        updates.append((row, COL_JUMBO_KG_PWEB, nuevo))
+            continue  # no pisar si no hay valor
+        a1 = f"I{row}"
+        updates.append({"range": a1, "values": [[nuevo]]})
 
-    # Batch update
     if updates:
-        # Construir rango y matriz
-        rng_a1 = f"I{min(u[0] for u in updates)}:I{max(u[0] for u in updates)}"
-        # Preparamos una lista con posiciones exactas
-        # Para simplicidad y eficiencia: hacemos updates individuales via ws.update_cells
-        # pero gspread moderno sugiere usar ws.batch_update
-        data = []
-        for (row, col, val) in updates:
-            a1 = f"{chr(64+col)}{row}"
-            data.append({
-                "range": a1,
-                "values": [[val]]
-            })
-        ws_pweb.batch_update([{"range": d["range"], "values": d["values"]} for d in data])
+        ws_pweb.batch_update(updates)
 
 def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str):
-    # Asegurar que existe columna de SKU en B
-    # Mapeo SKU -> fila
+    # Mapeo actual de SKU -> fila
     sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
-    # Asegurar nueva columna al final con fecha
-    # Tomamos número de columnas actual y sumamos 1
-    # Pero primero necesitamos el número de columnas efectivas -> con get_all_values()
+    # Valores de la hoja para calcular el próximo índice de columna
     values = ws_hist.get_all_values()
     if not values:
         values = [[""]]
 
-    num_rows = len(values)
     num_cols = max(len(r) for r in values) if values else 1
     new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
-    # Escribir encabezado
+
+    # Header fecha
     header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
     ws_hist.update(header_a1, fecha_str)
 
-    # Asegurar que todos los SKUs del scraping existan en la hoja; si faltan, agregarlos al final
-    existing_rows = num_rows
+    # Agregar SKUs nuevos (si no existen)
     to_append = []
     for sku in dict_sku_precio_kg.keys():
         if sku and sku not in sku_to_row:
-            to_append.append([ "", sku ])  # col A vacío (si existe), col B=SKU
+            to_append.append(["", sku])  # A vacío, B = SKU
     if to_append:
         ws_hist.append_rows(to_append, value_input_option="RAW")
-        # remapear después de append
         sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
-    # Preparar batch de escritura para la nueva columna
+    # Escribir columna nueva
     updates = []
     for sku, val in dict_sku_precio_kg.items():
         r = sku_to_row.get(sku)
