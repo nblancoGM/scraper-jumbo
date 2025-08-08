@@ -1,11 +1,10 @@
-name: Scrape Jumbo y actualizar sheets
+name: Scrape Jumbo y actualizar Google Sheets
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    # Lunes 11:00 America/Santiago
-    - cron: "0 15 * * 1"  # 11:00 CLT = 15:00 UTC aprox (ajusta si cambia horario)
-  # timezone runner es UTC, por eso usamos cron en UTC
+    # Todos los lunes a las 15:00 UTC ≈ 11:00 en Chile (invierno)
+    - cron: "0 15 * * 1"
 
 jobs:
   run-scraper:
@@ -14,9 +13,9 @@ jobs:
     permissions:
       contents: read
 
+    # Puedes dejar el SHEET_ID aquí o moverlo a Secrets si prefieres
     env:
       SHEET_ID: 14Rn3q0vhWAcxHxYTCzfuDOtk3Y9cKnJlglnMb-eHr14
-      # Usar el binario REAL del sistema, no el wrapper de snap
       CHROME_BIN: /usr/bin/chromium
 
     steps:
@@ -33,10 +32,12 @@ jobs:
         run: |
           set -e
           sudo apt-get update
-          sudo apt-get install -y chromium-browser || true
+          # Chromium suele instalarse como snap; en esta imagen hay un binario real en /usr/bin/chromium
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
+          # Chromedriver (el paquete varía por imagen)
           sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver || true
 
-      - name: Diagnóstico de binarios (opcional pero útil)
+      - name: Diagnóstico de binarios (opcional)
         shell: bash
         run: |
           echo "CHROME_BIN=$CHROME_BIN"
@@ -55,9 +56,14 @@ jobs:
 
       - name: Ejecutar scraper
         env:
-          # credenciales de la service account en claro dentro del secret
-          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS_JSON }}
           SHEET_ID: ${{ env.SHEET_ID }}
           CHROME_BIN: ${{ env.CHROME_BIN }}
+          # Fallback: usa GCP_SHEETS_CREDENTIALS si existe; si no, intenta GCP_SHEETS_CREDENTIALS_JSON
+          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS != '' && secrets.GCP_SHEETS_CREDENTIALS || secrets.GCP_SHEETS_CREDENTIALS_JSON }}
         run: |
+          # Validación explícita para evitar correr sin credenciales
+          if [ -z "${GCP_SHEETS_CREDENTIALS}" ]; then
+            echo "ERROR: GCP_SHEETS_CREDENTIALS está vacío. Define el secret en Settings → Secrets and variables → Actions." >&2
+            exit 1
+          fi
           python scraper.py
