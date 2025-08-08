@@ -3,7 +3,7 @@
 Scraper + actualización de Google Sheets (P-web y Jumbo) vía API (gspread).
 
 Lee hoja 'Jumbo-info' (SKU=B, URL=D, Peso Jumbo=E, Precio GM=F, Peso GM=G).
-Scrapea precio en la página de Jumbo con Selenium (Chromium headless).
+Scrapea precio en la página de Jumbo con Selenium (Chrome headless).
 Calcula "Precio por 1 kg Jumbo" = precio_scrapeado / PesoJumbo_g * 1000 (redondeado).
 
 Actualiza:
@@ -17,9 +17,9 @@ Actualiza:
 Variables de entorno requeridas:
 - GCP_SHEETS_CREDENTIALS  (contenido JSON de Service Account)
 - SHEET_ID                (ID del spreadsheet)
-- CHROME_BIN              (opcional; si no viene, intenta '/usr/bin/chromium')
+- CHROME_BIN              (opcional; si viene, lo usamos como binario de Chrome)
 
-Ejecución local/manual:
+Ejecución:
     python scraper.py
 """
 
@@ -53,7 +53,6 @@ SHEET_ID = os.getenv("SHEET_ID", "").strip()
 if not SHEET_ID:
     raise RuntimeError("Falta SHEET_ID en variables de entorno.")
 
-# Nombres de hojas (exactos)
 SHEET_JUMBO_INFO = "Jumbo-info"
 SHEET_PWEB = "P-web"
 SHEET_JUMBO_HIST = "Jumbo"
@@ -73,7 +72,6 @@ COL_JUMBO_KG_PWEB = 9  # Columna I
 COL_SKU_HIST = 2
 COL_FECHAS_INICIA_EN = 3  # Columna C
 
-# Pausas suaves para no ser agresivos
 SLEEP_MIN = 0.6
 SLEEP_MAX = 1.2
 
@@ -143,18 +141,16 @@ def precio_por_kg(precio: Optional[int], peso_gr: Optional[float]) -> Optional[i
         return None
 
 # =========================
-# Selenium (Chromium headless) con perfil único
+# Selenium (Chrome headless) con perfil único
 # =========================
 
 def build_browser():
     """
     Construye un Chrome headless robusto para CI:
     - Perfil único por ejecución (evita "user data dir is already in use")
-    - Binario de Chrome desde CHROME_BIN o /usr/bin/chromium
-    - Deja que Selenium Manager resuelva chromedriver (más estable)
+    - Usa CHROME_BIN si está definido, si no, deja que Selenium Manager resuelva
     """
     options = Options()
-    # Headless y flags recomendadas para CI
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -178,12 +174,12 @@ def build_browser():
     options.add_argument(f"--user-data-dir={profile_dir}")
     options.add_argument("--remote-debugging-port=9222")
 
-    # Binario de Chrome
-    chrome_bin = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
-    if os.path.exists(chrome_bin):
+    # Usar CHROME_BIN solo si viene seteado explícitamente
+    chrome_bin = os.environ.get("CHROME_BIN", "").strip()
+    if chrome_bin and os.path.exists(chrome_bin):
         options.binary_location = chrome_bin
 
-    # No forzamos Service/driver path -> Selenium Manager se encarga
+    # No forzamos Service: Selenium Manager resuelve el driver
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(90)
     return driver
@@ -284,7 +280,6 @@ def mapear_sku_a_fila(ws, col_sku_idx: int) -> Dict[str, int]:
 def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
     """Actualiza P-web (columna I = Jumbo Kg) por SKU, sin pisar si el nuevo valor es None."""
     sku_to_row = mapear_sku_a_fila(ws_pweb, COL_SKU_PWEB)
-    # No necesitamos leer los valores actuales: si nuevo es None, simplemente no actualizamos.
     updates = []
     for sku, nuevo in dict_sku_precio_kg.items():
         row = sku_to_row.get(sku)
@@ -350,7 +345,6 @@ def main():
     fecha_str = datetime.now(tz_scl).strftime("%d-%m-%Y")
 
     sh = open_sheet()
-    ws_info = sh.worksheet(SHEET_JUMBO_INFO)  # noqa: F841 (se usa indirectamente)
     ws_pweb = sh.worksheet(SHEET_PWEB)
     ws_hist = sh.worksheet(SHEET_JUMBO_HIST)
 
