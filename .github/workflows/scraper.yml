@@ -1,0 +1,43 @@
+name: Scrape Jumbo y actualizar Google Sheets
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Todos los lunes a las 15:00 UTC == 11:00 en Chile (invierno, UTC-4)
+    - cron: "0 15 * * 1"
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar Chromium & Chromedriver
+        run: |
+          sudo apt-get update
+          # Intentar instalar chromium y chromedriver (nombres varían por distro)
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+          sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver
+          which chromium || true
+          which chromium-browser || true
+          which chromedriver || true
+          ls -l /usr/bin/chrom* || true
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar scraper
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS }}
+        run: |
+          python scraper.py
