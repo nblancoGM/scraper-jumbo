@@ -1,14 +1,23 @@
-name: Scrape Jumbo y actualizar Google Sheets
+name: Scrape Jumbo y actualizar sheets
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    # Todos los lunes a las 15:00 UTC (equivale a ~11:00 en Chile en invierno)
-    - cron: "0 15 * * 1"
+    # Lunes 11:00 America/Santiago
+    - cron: "0 15 * * 1"  # 11:00 CLT = 15:00 UTC aprox (ajusta si cambia horario)
+  # timezone runner es UTC, por eso usamos cron en UTC
 
 jobs:
   run-scraper:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    env:
+      SHEET_ID: 14Rn3q0vhWAcxHxYTCzfuDOtk3Y9cKnJlglnMb-eHr14
+      # Usar el binario REAL del sistema, no el wrapper de snap
+      CHROME_BIN: /usr/bin/chromium
 
     steps:
       - name: Checkout
@@ -20,28 +29,35 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar Chromium & Chromedriver
+        shell: bash
         run: |
           set -e
           sudo apt-get update
-          # Chromium suele instalarse como snap en ubuntu-latest
           sudo apt-get install -y chromium-browser || true
-          # Chromedriver: el paquete varía según imagen
           sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver || true
-          echo "which chromium:"; which chromium || true
-          echo "which chromium-browser:"; which chromium-browser || true
-          echo "which chromedriver:"; which chromedriver || true
-          echo "ls /usr/bin/chrom*:"; ls -l /usr/bin/chrom* || true
-          echo "ls /snap/bin/chrom*:"; ls -l /snap/bin/chrom* || true
+
+      - name: Diagnóstico de binarios (opcional pero útil)
+        shell: bash
+        run: |
+          echo "CHROME_BIN=$CHROME_BIN"
+          command -v "$CHROME_BIN" || true
+          "$CHROME_BIN" --version || true
+          command -v chromedriver || true
+          chromedriver --version || true
+          ls -l /usr/bin/chrom* || true
+          ls -l /snap/bin/chrom* || true
 
       - name: Instalar dependencias
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Ejecutar scraper
         env:
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS }}
-          CHROME_BIN: /snap/bin/chromium
+          # credenciales de la service account en claro dentro del secret
+          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS_JSON }}
+          SHEET_ID: ${{ env.SHEET_ID }}
+          CHROME_BIN: ${{ env.CHROME_BIN }}
         run: |
           python scraper.py
