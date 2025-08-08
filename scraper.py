@@ -29,7 +29,6 @@ import re
 import time
 import json
 import random
-import shutil
 import uuid
 import tempfile
 from typing import Optional, Tuple, List, Dict, Any
@@ -146,9 +145,9 @@ def precio_por_kg(precio: Optional[int], peso_gr: Optional[float]) -> Optional[i
 
 def build_browser():
     """
-    Construye un Chrome headless robusto para CI:
+    Chrome headless para CI:
     - Perfil único por ejecución (evita "user data dir is already in use")
-    - Usa CHROME_BIN si está definido, si no, deja que Selenium Manager resuelva
+    - Usa CHROME_BIN si está definido; Selenium Manager resuelve el driver
     """
     options = Options()
     options.add_argument("--headless=new")
@@ -168,18 +167,16 @@ def build_browser():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 
-    # Perfil temporal único
     profile_dir = os.path.join(tempfile.gettempdir(), f"chrome-profile-{uuid.uuid4()}")
     os.makedirs(profile_dir, exist_ok=True)
     options.add_argument(f"--user-data-dir={profile_dir}")
     options.add_argument("--remote-debugging-port=9222")
 
-    # Usar CHROME_BIN solo si viene seteado explícitamente
     chrome_bin = os.environ.get("CHROME_BIN", "").strip()
     if chrome_bin and os.path.exists(chrome_bin):
         options.binary_location = chrome_bin
 
-    # No forzamos Service: Selenium Manager resuelve el driver
+    # Selenium Manager elegirá el driver apropiado
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(90)
     return driver
@@ -293,7 +290,7 @@ def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
         ws_pweb.batch_update(updates)
 
 def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str):
-    """Agrega una columna nueva con la fecha y escribe por SKU los valores."""
+    """Agrega una columna nueva con la fecha y escribe por SKU los valores (usando batch_update seguro)."""
     sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
     # Determinar próxima columna disponible (>= C)
@@ -303,9 +300,9 @@ def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int
     num_cols = max(len(r) for r in values) if values else 1
     new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
 
-    # Encabezado de fecha en la fila 1
+    # Encabezado de fecha en la fila 1 (usar batch_update con [[valor]], evita errores 400)
     header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
-    ws_hist.update(header_a1, fecha_str)
+    ws_hist.batch_update([{"range": header_a1, "values": [[fecha_str]]}])
 
     # Agregar SKUs que no existan
     to_append = []
