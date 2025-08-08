@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Instalamos Google Chrome estable desde el repo oficial (NO snap)
+      # Instalar Google Chrome estable (NO snap)
       - name: Instalar Google Chrome estable (no Snap)
         shell: bash
         run: |
@@ -37,6 +37,8 @@ jobs:
           sudo apt-get install -y google-chrome-stable
           echo "Chrome instalado:"
           /usr/bin/google-chrome --version
+          # IMPORTANTE: quitar cualquier chromedriver del PATH para dejar que Selenium Manager elija
+          sudo rm -f /usr/bin/chromedriver || true
 
       - name: Instalar dependencias Python
         shell: bash
@@ -46,13 +48,10 @@ jobs:
 
       - name: Ejecutar scraper
         env:
-          # Usa los secrets que ya tienes creados
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS }}
-          # Apuntamos explícitamente a Chrome estable recién instalado
           CHROME_BIN: /usr/bin/google-chrome
         run: |
-          # Freno de seguridad
           if [ -z "${GCP_SHEETS_CREDENTIALS}" ]; then
             echo "ERROR: GCP_SHEETS_CREDENTIALS está vacío. Define el secret en Settings → Secrets and variables → Actions." >&2
             exit 1
