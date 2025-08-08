@@ -13,11 +13,6 @@ jobs:
     permissions:
       contents: read
 
-    # Puedes dejar el SHEET_ID aquí o moverlo a Secrets si prefieres
-    env:
-      SHEET_ID: 14Rn3q0vhWAcxHxYTCzfuDOtk3Y9cKnJlglnMb-eHr14
-      CHROME_BIN: /usr/bin/chromium
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,28 +22,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Instalar Chromium & Chromedriver
+      # Instalamos Google Chrome estable desde el repo oficial (NO snap)
+      - name: Instalar Google Chrome estable (no Snap)
         shell: bash
         run: |
           set -e
           sudo apt-get update
-          # Chromium suele instalarse como snap; en esta imagen hay un binario real en /usr/bin/chromium
-          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
-          # Chromedriver (el paquete varía por imagen)
-          sudo apt-get install -y chromium-chromedriver || sudo apt-get install -y chromium-driver || true
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /etc/apt/keyrings/google-linux.gpg
+          sudo chmod a+r /etc/apt/keyrings/google-linux.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-linux.gpg] https://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          echo "Chrome instalado:"
+          /usr/bin/google-chrome --version
 
-      - name: Diagnóstico de binarios (opcional)
-        shell: bash
-        run: |
-          echo "CHROME_BIN=$CHROME_BIN"
-          command -v "$CHROME_BIN" || true
-          "$CHROME_BIN" --version || true
-          command -v chromedriver || true
-          chromedriver --version || true
-          ls -l /usr/bin/chrom* || true
-          ls -l /snap/bin/chrom* || true
-
-      - name: Instalar dependencias
+      - name: Instalar dependencias Python
         shell: bash
         run: |
           python -m pip install --upgrade pip
@@ -56,12 +46,13 @@ jobs:
 
       - name: Ejecutar scraper
         env:
-          SHEET_ID: ${{ env.SHEET_ID }}
-          CHROME_BIN: ${{ env.CHROME_BIN }}
-          # Fallback: usa GCP_SHEETS_CREDENTIALS si existe; si no, intenta GCP_SHEETS_CREDENTIALS_JSON
-          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS != '' && secrets.GCP_SHEETS_CREDENTIALS || secrets.GCP_SHEETS_CREDENTIALS_JSON }}
+          # Usa los secrets que ya tienes creados
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SHEETS_CREDENTIALS: ${{ secrets.GCP_SHEETS_CREDENTIALS }}
+          # Apuntamos explícitamente a Chrome estable recién instalado
+          CHROME_BIN: /usr/bin/google-chrome
         run: |
-          # Validación explícita para evitar correr sin credenciales
+          # Freno de seguridad
           if [ -z "${GCP_SHEETS_CREDENTIALS}" ]; then
             echo "ERROR: GCP_SHEETS_CREDENTIALS está vacío. Define el secret en Settings → Secrets and variables → Actions." >&2
             exit 1
