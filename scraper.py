@@ -184,6 +184,7 @@ def build_browser():
 def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
     textos = []
     selectores_css = [
+        ".text-neutral700",
         "[class*='price']",
         "[data-testid*='price']",
         "[data-qa*='price']",
