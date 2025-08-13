@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Scraper mejorado para Jumbo.cl - Maneja JavaScript y estructura moderna
+Scraper específico para Jumbo.cl basado en la estructura real del sitio
 """
 
 from selenium import webdriver
@@ -17,7 +17,7 @@ import uuid
 import os
 
 def build_browser():
-    """Configuración mejorada para manejar sitios con JavaScript"""
+    """Configuración específica para Jumbo.cl"""
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -28,11 +28,14 @@ def build_browser():
     options.add_experimental_option('useAutomationExtension', False)
     options.add_argument("--window-size=1920,1080")
     
-    # User agent más realista
+    # User agent específico para Chile
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
+    
+    # Headers adicionales para parecer más legítimo
+    options.add_argument("--accept-language=es-CL,es;q=0.9,en;q=0.8")
     
     # Perfil único
     profile_dir = os.path.join(tempfile.gettempdir(), f"chrome-profile-{uuid.uuid4()}")
@@ -46,265 +49,394 @@ def build_browser():
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(120)
     
-    # Ejecutar script para ocultar que es automatizado
+    # Scripts para ocultar automatización
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array")
+    driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise")
+    driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol")
     
     return driver
 
-def extraer_precio_texto(texto):
-    """Función mejorada para extraer precios"""
-    # Limpiar texto
-    texto = texto.replace('\n', ' ').replace('\t', ' ').strip()
+def extraer_precio_jumbo(texto):
+    """Función específica para extraer precios del formato de Jumbo Chile"""
+    if not texto or len(texto) > 200:
+        return None
     
-    # Patrón más flexible para precios chilenos
+    # Limpiar el texto
+    texto = texto.replace('\n', ' ').replace('\t', ' ').strip()
+    texto = re.sub(r'\s+', ' ', texto)  # Múltiples espacios -> uno
+    
+    print(f"         DEBUG: Analizando texto: '{texto[:100]}'")
+    
+    # Patrones específicos para Jumbo Chile
     patrones = [
-        r'\$\s*([\d\.]+)',  # $1.234
-        r'\$\s*([\d,]+)',   # $1,234
-        r'(\d{1,3}(?:\.\d{3})*)\s*pesos',  # 1.234 pesos
-        r'(\d{1,3}(?:,\d{3})*)\s*pesos',   # 1,234 pesos
-        r'CLP\s*([\d\.]+)',  # CLP 1234
-        r'(\d{1,6})\s*$'     # Solo números al final
+        # Formato principal: $1.234 o $ 1.234
+        r'\$\s*([\d\.]+)(?!\s*(?:antes|original|normal|was))',
+        
+        # Formato con separadores de miles: 1.234
+        r'(?<![\d\.])([\d]{1,3}(?:\.[\d]{3})+)(?!\s*(?:antes|original|kg|g|ml|lt|und|pack))',
+        
+        # Precio sin símbolo pero con contexto
+        r'(?i)(?:precio|valor|cuesta|vale)\s*:?\s*([\d\.]+)',
+        
+        # Solo números de 3-6 dígitos (rango típico de precios)
+        r'(?<![\d\.])([\d]{3,6})(?![\d\.]|(?:\s*(?:g|kg|ml|lt|cm|mm|und|pack|años|days|hrs)))',
+        
+        # Formatos específicos de e-commerce chileno
+        r'CLP\s*([\d\.]+)',
+        r'Precio\s*:?\s*\$?\s*([\d\.]+)',
+        r'Total\s*:?\s*\$?\s*([\d\.]+)',
     ]
     
-    for patron in patrones:
-        match = re.search(patron, texto, re.IGNORECASE)
-        if match:
-            precio_str = match.group(1).replace('.', '').replace(',', '')
-            try:
-                precio = int(precio_str)
-                if 100 <= precio <= 1000000:  # Rango razonable para productos
-                    return precio
-            except ValueError:
-                continue
+    for i, patron in enumerate(patrones, 1):
+        matches = re.findall(patron, texto, re.IGNORECASE)
+        if matches:
+            print(f"         DEBUG: Patrón {i} encontró: {matches}")
+            for match in matches:
+                try:
+                    # Limpiar el precio
+                    precio_str = str(match).replace('.', '').replace(',', '')
+                    precio = int(precio_str)
+                    
+                    # Validar rango de precios típicos en supermercado chileno
+                    if 50 <= precio <= 500000:  # De $50 a $500.000
+                        print(f"         DEBUG: Precio válido encontrado: ${precio:,}")
+                        return precio
+                    else:
+                        print(f"         DEBUG: Precio fuera de rango: {precio}")
+                except (ValueError, TypeError):
+                    continue
     
+    print("         DEBUG: No se encontró precio válido")
     return None
 
-def obtener_precio_mejorado(url: str, driver: webdriver.Chrome, timeout_s: int = 30) -> tuple:
-    """Estrategia mejorada para obtener precios de Jumbo.cl"""
-    print(f"🌐 Procesando URL: {url}")
+def obtener_precio_jumbo_especifico(url: str, driver: webdriver.Chrome, max_retries: int = 3) -> tuple:
+    """
+    Función específica para obtener precios de Jumbo.cl
+    Maneja la estructura moderna de SPA con JavaScript
+    """
+    print(f"🌐 Procesando URL Jumbo: {url}")
     
-    try:
-        driver.get(url)
-        print("   📄 Página cargada, esperando JavaScript...")
-        
-        # Esperar más tiempo para JavaScript
-        time.sleep(8)
-        
-        # Estrategias múltiples para encontrar el precio
-        estrategias = [
-            # Estrategia 1: Selectores específicos de precio
-            {
-                'name': 'Selectores específicos',
-                'selectors': [
-                    '[data-testid*="price"]',
-                    '[class*="price"]',
-                    '[class*="Price"]',
-                    '[id*="price"]',
-                    '.vtex-product-price',
-                    '.vtex-store-components',
-                    '[class*="currency"]'
-                ]
-            },
-            # Estrategia 2: Texto que contiene $
-            {
-                'name': 'Elementos con símbolo $',
-                'method': 'dollar_search'
-            },
-            # Estrategia 3: Números grandes (precios)
-            {
-                'name': 'Búsqueda por patrones de precio',
-                'method': 'pattern_search'
-            }
-        ]
-        
-        for estrategia in estrategias:
-            print(f"   🔍 Probando estrategia: {estrategia['name']}")
+    for intento in range(1, max_retries + 1):
+        try:
+            print(f"   Intento {intento}/{max_retries}")
             
-            if estrategia.get('method') == 'dollar_search':
-                # Buscar todos los elementos que contengan $
+            # Cargar la página
+            driver.get(url)
+            print("   📄 Página cargada, esperando JavaScript...")
+            
+            # Esperar que JavaScript se ejecute
+            time.sleep(10)  # Tiempo suficiente para SPA
+            
+            # Verificar si la página se cargó correctamente
+            page_source = driver.page_source
+            if "You need to enable JavaScript" in page_source:
+                print("   ❌ JavaScript no se ejecutó correctamente")
+                if intento < max_retries:
+                    time.sleep(5)
+                    continue
+                else:
+                    return None, "javascript_error"
+            
+            # Esperar a que aparezca contenido de producto
+            try:
+                WebDriverWait(driver, 20).until(
+                    lambda d: len(d.find_elements(By.TAG_NAME, "div")) > 10
+                )
+                print("   ✅ Contenido de la página cargado")
+            except TimeoutException:
+                print("   ⚠️ Timeout esperando contenido, pero continuando...")
+            
+            # ESTRATEGIA 1: Buscar selectores específicos de e-commerce
+            selectores_precio = [
+                # Selectores comunes de plataformas e-commerce
+                '[data-testid*="price"]',
+                '[data-cy*="price"]',
+                '[class*="price"]',
+                '[class*="Price"]',
+                '[class*="currency"]',
+                '[class*="money"]',
+                '[class*="amount"]',
+                '[class*="cost"]',
+                '[id*="price"]',
+                
+                # Selectores específicos de VTEX (común en Chile)
+                '.vtex-product-price',
+                '.vtex-store-components',
+                '.vtex-flex-layout',
+                
+                # Selectores generales con números
+                'span[class*="bold"]',
+                'div[class*="bold"]',
+                'p[class*="bold"]',
+                'strong',
+                'b',
+                
+                # Selectores por estructura
+                'main *',
+                'article *',
+                '[role="main"] *',
+            ]
+            
+            print("   🔍 Buscando con selectores específicos...")
+            for selector in selectores_precio[:10]:  # Limitar para performance
                 try:
-                    elementos = driver.find_elements(By.XPATH, "//*[contains(text(), '$')]")
-                    print(f"      Encontrados {len(elementos)} elementos con '$'")
-                    
-                    for elem in elementos[:10]:  # Limitar a 10 para performance
-                        try:
-                            texto = elem.text.strip()
-                            if texto and len(texto) < 100:  # Evitar textos muy largos
-                                print(f"         Texto: '{texto}'")
-                                precio = extraer_precio_texto(texto)
-                                if precio:
-                                    print(f"         ✅ Precio encontrado: ${precio:,}")
-                                    return precio, "ok"
-                        except Exception:
-                            continue
-                except Exception as e:
-                    print(f"      Error en dollar_search: {e}")
-            
-            elif estrategia.get('method') == 'pattern_search':
-                # Buscar por patrones numéricos
-                try:
-                    # Buscar elementos con números que parezcan precios
-                    elementos = driver.find_elements(By.XPATH, "//*[text()[contains(., '1') or contains(., '2') or contains(., '3') or contains(., '4') or contains(., '5')]]")
-                    
-                    for elem in elementos[:20]:
-                        try:
-                            texto = elem.text.strip()
-                            if re.search(r'\d{3,6}', texto):  # Al menos 3 dígitos
-                                precio = extraer_precio_texto(texto)
-                                if precio:
-                                    print(f"         ✅ Precio por patrón: ${precio:,} desde '{texto}'")
-                                    return precio, "ok"
-                        except Exception:
-                            continue
-                except Exception as e:
-                    print(f"      Error en pattern_search: {e}")
-            
-            else:
-                # Selectores CSS específicos
-                for selector in estrategia.get('selectors', []):
-                    try:
-                        elementos = driver.find_elements(By.CSS_SELECTOR, selector)
+                    elementos = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elementos:
                         print(f"      Selector '{selector}': {len(elementos)} elementos")
                         
-                        for elem in elementos:
+                        for elem in elementos[:15]:  # Limitar elementos por selector
                             try:
                                 texto = elem.text.strip()
-                                if texto:
-                                    precio = extraer_precio_texto(texto)
+                                if texto and 2 <= len(texto) <= 50:  # Longitud razonable
+                                    precio = extraer_precio_jumbo(texto)
                                     if precio:
-                                        print(f"         ✅ Precio con selector: ${precio:,}")
+                                        print(f"      ✅ Precio encontrado con selector: ${precio:,}")
                                         return precio, "ok"
                             except Exception:
                                 continue
-                    except Exception as e:
-                        print(f"      Error con selector {selector}: {e}")
-        
-        # Estrategia final: Inspeccionar el DOM completo
-        print("   🔬 Estrategia final: análisis completo del DOM")
-        try:
-            # Obtener todo el texto de la página
-            page_text = driver.find_element(By.TAG_NAME, "body").text
+                except Exception as e:
+                    continue
             
-            # Buscar patrones de precio en todo el texto
-            patrones_precio = re.findall(r'\$\s*(\d{1,3}(?:\.\d{3})*)', page_text)
-            if patrones_precio:
-                for precio_str in patrones_precio:
-                    precio = int(precio_str.replace('.', ''))
-                    if 100 <= precio <= 1000000:
-                        print(f"         ✅ Precio en DOM completo: ${precio:,}")
-                        return precio, "ok"
-        except Exception as e:
-            print(f"      Error en análisis DOM: {e}")
-        
-        print("   ❌ No se encontró precio con ninguna estrategia")
-        return None, "precio_no_encontrado"
-        
-    except TimeoutException:
-        print("   ❌ Timeout cargando la página")
-        return None, "timeout"
-    except Exception as e:
-        print(f"   ❌ Error inesperado: {e}")
-        return None, "error"
-
-def debug_page_content(driver):
-    """Función para debuggear el contenido de la página"""
-    try:
-        print("\n🔍 DEBUG: Analizando contenido de la página...")
-        
-        # 1. Verificar si hay contenido JavaScript sin cargar
-        page_source = driver.page_source
-        if "You need to enable JavaScript" in page_source:
-            print("❌ La página requiere JavaScript y no se ha cargado correctamente")
-            return
-        
-        # 2. Buscar elementos con precio potenciales
-        elementos_con_numeros = driver.find_elements(By.XPATH, "//*[text()[contains(., '$') or contains(., '1') or contains(., '2') or contains(., '3') or contains(., '4') or contains(., '5') or contains(., '6') or contains(., '7') or contains(., '8') or contains(., '9')]]")
-        
-        print(f"Elementos con números encontrados: {len(elementos_con_numeros)}")
-        
-        textos_interesantes = []
-        for elem in elementos_con_numeros[:20]:  # Límite para evitar spam
+            # ESTRATEGIA 2: Búsqueda por contenido con $
+            print("   🔍 Buscando elementos con símbolo $...")
             try:
-                texto = elem.text.strip()
-                if texto and len(texto) < 200:  # Evitar textos muy largos
-                    if re.search(r'\d', texto):  # Contiene al menos un dígito
-                        textos_interesantes.append(texto)
-            except Exception:
-                continue
-        
-        print("Textos con números encontrados:")
-        for i, texto in enumerate(textos_interesantes[:10], 1):
-            print(f"   {i}. '{texto}'")
-        
-        # 3. Verificar clases CSS comunes
-        clases_comunes = ['price', 'Price', 'cost', 'currency', 'money', 'amount', 'valor']
-        for clase in clases_comunes:
-            elementos = driver.find_elements(By.XPATH, f"//*[contains(@class, '{clase}')]")
-            if elementos:
-                print(f"Elementos con clase '{clase}': {len(elementos)}")
-                for elem in elementos[:3]:
+                elementos_dollar = driver.find_elements(By.XPATH, "//*[contains(text(), '$')]")
+                print(f"      Encontrados {len(elementos_dollar)} elementos con '$'")
+                
+                for elem in elementos_dollar[:20]:
                     try:
                         texto = elem.text.strip()
-                        if texto:
-                            print(f"   - '{texto}'")
+                        if texto and len(texto) <= 100:
+                            precio = extraer_precio_jumbo(texto)
+                            if precio:
+                                print(f"      ✅ Precio encontrado con $: ${precio:,}")
+                                return precio, "ok"
                     except Exception:
                         continue
+            except Exception as e:
+                print(f"      Error buscando $: {e}")
+            
+            # ESTRATEGIA 3: Análisis del DOM completo
+            print("   🔍 Análisis completo del DOM...")
+            try:
+                # Obtener todos los textos de la página
+                all_elements = driver.find_elements(By.XPATH, "//*[text()]")
+                textos_con_numeros = []
+                
+                for elem in all_elements:
+                    try:
+                        texto = elem.text.strip()
+                        if texto and re.search(r'\d', texto) and len(texto) <= 200:
+                            textos_con_numeros.append(texto)
+                    except Exception:
+                        continue
+                
+                print(f"      Analizando {len(textos_con_numeros)} textos con números...")
+                
+                # Buscar precios en todos los textos
+                for texto in textos_con_numeros[:50]:  # Limitar para performance
+                    precio = extraer_precio_jumbo(texto)
+                    if precio:
+                        print(f"      ✅ Precio en análisis DOM: ${precio:,}")
+                        return precio, "ok"
+                        
+            except Exception as e:
+                print(f"      Error en análisis DOM: {e}")
+            
+            # ESTRATEGIA 4: JavaScript para obtener precios
+            print("   🔍 Ejecutando JavaScript para buscar precios...")
+            try:
+                # Script para buscar precios dinámicamente
+                js_script = """
+                var textos = [];
+                var elements = document.querySelectorAll('*');
+                for (var i = 0; i < elements.length && textos.length < 100; i++) {
+                    var el = elements[i];
+                    if (el.innerText && el.innerText.trim() && 
+                        (el.innerText.includes('$') || /\\d{3,6}/.test(el.innerText)) &&
+                        el.innerText.length < 200) {
+                        textos.push(el.innerText.trim());
+                    }
+                }
+                return textos;
+                """
+                
+                textos_js = driver.execute_script(js_script)
+                print(f"      JavaScript encontró {len(textos_js)} textos potenciales")
+                
+                for texto in textos_js:
+                    precio = extraer_precio_jumbo(texto)
+                    if precio:
+                        print(f"      ✅ Precio con JavaScript: ${precio:,}")
+                        return precio, "ok"
+                        
+            except Exception as e:
+                print(f"      Error ejecutando JavaScript: {e}")
+            
+            print(f"   ❌ No se encontró precio en intento {intento}")
+            
+            if intento < max_retries:
+                wait_time = 3 + (intento * 2)
+                print(f"   ⏳ Esperando {wait_time}s antes del siguiente intento...")
+                time.sleep(wait_time)
+                
+        except Exception as e:
+            print(f"   ❌ Error en intento {intento}: {type(e).__name__}: {e}")
+            if intento < max_retries:
+                time.sleep(5)
+            
+    print(f"   ❌ FALLO FINAL: No se encontró precio después de {max_retries} intentos")
+    return None, "precio_no_encontrado"
+
+def debug_jumbo_page(driver, url):
+    """Función específica para debuggear páginas de Jumbo"""
+    print(f"\n🔬 DEBUG COMPLETO para: {url}")
+    
+    try:
+        driver.get(url)
+        time.sleep(15)  # Espera larga para JavaScript
         
+        # 1. Verificar carga de JavaScript
+        page_source = driver.page_source
+        print(f"   Tamaño del HTML: {len(page_source)} caracteres")
+        
+        if "You need to enable JavaScript" in page_source:
+            print("   ❌ PROBLEMA: JavaScript no se ejecutó")
+            return
+        
+        # 2. Verificar título y URL final
+        try:
+            titulo = driver.title
+            url_final = driver.current_url
+            print(f"   Título: {titulo}")
+            print(f"   URL final: {url_final}")
+        except Exception as e:
+            print(f"   Error obteniendo título/URL: {e}")
+        
+        # 3. Contar elementos
+        try:
+            total_divs = len(driver.find_elements(By.TAG_NAME, "div"))
+            total_spans = len(driver.find_elements(By.TAG_NAME, "span"))
+            total_texto = len(driver.find_elements(By.XPATH, "//*[text()]"))
+            print(f"   Elementos DIV: {total_divs}")
+            print(f"   Elementos SPAN: {total_spans}")
+            print(f"   Elementos con texto: {total_texto}")
+        except Exception as e:
+            print(f"   Error contando elementos: {e}")
+        
+        # 4. Buscar textos con números
+        try:
+            elementos_numeros = driver.find_elements(By.XPATH, "//*[text()[contains(., '1') or contains(., '2') or contains(., '3') or contains(., '4') or contains(., '5')]]")
+            print(f"   Elementos con números: {len(elementos_numeros)}")
+            
+            # Mostrar algunos ejemplos
+            ejemplos = []
+            for elem in elementos_numeros[:20]:
+                try:
+                    texto = elem.text.strip()
+                    if texto and len(texto) <= 100:
+                        ejemplos.append(texto)
+                except Exception:
+                    continue
+            
+            print("   Ejemplos de textos con números:")
+            for i, texto in enumerate(ejemplos[:10], 1):
+                print(f"      {i}. '{texto}'")
+                
+        except Exception as e:
+            print(f"   Error buscando números: {e}")
+        
+        # 5. Buscar elementos con $
+        try:
+            elementos_dollar = driver.find_elements(By.XPATH, "//*[contains(text(), '$')]")
+            print(f"   Elementos con '$': {len(elementos_dollar)}")
+            
+            for i, elem in enumerate(elementos_dollar[:5], 1):
+                try:
+                    texto = elem.text.strip()
+                    print(f"      ${i}: '{texto}'")
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            print(f"   Error buscando $: {e}")
+        
+        # 6. Analizar clases CSS
+        try:
+            js_clases = """
+            var clases = new Set();
+            var elements = document.querySelectorAll('*');
+            for (var i = 0; i < elements.length && clases.size < 50; i++) {
+                var el = elements[i];
+                if (el.className && typeof el.className === 'string') {
+                    el.className.split(' ').forEach(function(clase) {
+                        if (clase && (clase.toLowerCase().includes('price') || 
+                                     clase.toLowerCase().includes('money') || 
+                                     clase.toLowerCase().includes('cost') ||
+                                     clase.toLowerCase().includes('currency'))) {
+                            clases.add(clase);
+                        }
+                    });
+                }
+            }
+            return Array.from(clases);
+            """
+            
+            clases_precio = driver.execute_script(js_clases)
+            if clases_precio:
+                print(f"   Clases relacionadas con precio: {clases_precio}")
+            else:
+                print("   No se encontraron clases relacionadas con precio")
+                
+        except Exception as e:
+            print(f"   Error analizando clases: {e}")
+        
+        # 7. Screenshot para debugging visual (opcional)
+        try:
+            screenshot_path = f"/tmp/jumbo_debug_{int(time.time())}.png"
+            driver.save_screenshot(screenshot_path)
+            print(f"   Screenshot guardado en: {screenshot_path}")
+        except Exception as e:
+            print(f"   No se pudo guardar screenshot: {e}")
+            
     except Exception as e:
-        print(f"Error en debug: {e}")
+        print(f"   Error general en debug: {e}")
 
-# Función de prueba
-# Reemplazar tu función obtener_precio() actual con obtener_precio_mejorado()
-# También puedes usar debug_page_content() cuando necesites investigar problemas
-
-def integrar_con_script_actual():
-    """
-    Para integrar estas mejoras con tu script actual:
-    
-    1. Reemplaza la función obtener_precio() con obtener_precio_mejorado()
-    2. Reemplaza la función extraer_precio() con extraer_precio_texto()
-    3. Aumenta el tiempo de espera en build_browser()
-    4. Usa debug_page_content() cuando no encuentres precios
-    
-    Cambios específicos en scraper.py:
-    - Línea ~140: Cambiar time.sleep(3) por time.sleep(8)
-    - Línea ~159: Reemplazar la lógica de búsqueda por font-bold
-    - Añadir manejo de errores más robusto
-    """
-    pass
-
-def test_scraper():
-    """Función para probar el scraper con una URL"""
+def test_jumbo_scraper():
+    """Función de prueba específica para Jumbo"""
     driver = build_browser()
     
     try:
-        # URLs de prueba
+        # URLs de prueba reales de Jumbo
         test_urls = [
             "https://www.jumbo.cl/pechuga-deshuesada-de-pollo-800-g-cuisine-and-co-1801136/p",
-            "https://www.jumbo.cl/trutro-corto-de-pollo-canto-del-gallo-granel/p"
+            "https://www.jumbo.cl/trutro-corto-de-pollo-canto-del-gallo-granel/p",
+            "https://www.jumbo.cl/filetillo-de-pollo-800-g-cuisine-and-co-1801137/p"
         ]
         
-        for i, test_url in enumerate(test_urls, 1):
-            print(f"\n{'='*50}")
-            print(f"PRUEBA {i}/{len(test_urls)}")
-            print(f"{'='*50}")
+        for i, url in enumerate(test_urls, 1):
+            print(f"\n{'='*80}")
+            print(f"PRUEBA {i}/{len(test_urls)} - URL: {url}")
+            print(f"{'='*80}")
             
-            # Intentar obtener precio
-            precio, status = obtener_precio_mejorado(test_url, driver)
+            # Primer intento: obtener precio
+            precio, status = obtener_precio_jumbo_especifico(url, driver)
             
             if precio:
                 print(f"\n✅ ÉXITO: Precio obtenido: ${precio:,}")
             else:
                 print(f"\n❌ FALLO: {status}")
-                # Hacer debug si falla
-                debug_page_content(driver)
+                print("Ejecutando debug completo...")
+                debug_jumbo_page(driver, url)
             
             if i < len(test_urls):
-                print("Esperando 3 segundos antes de la siguiente prueba...")
-                time.sleep(3)
-            
+                print(f"\n⏳ Esperando 5 segundos antes de la siguiente prueba...")
+                time.sleep(5)
+                
     finally:
+        print("\n🔒 Cerrando navegador...")
         driver.quit()
 
 if __name__ == "__main__":
-    test_scraper()
+    test_jumbo_scraper()
