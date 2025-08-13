@@ -2,22 +2,25 @@
 """
 Scraper + actualización de Google Sheets (P-web y Jumbo) vía API (gspread).
 
-VERSIÓN CORREGIDA Y ROBUSTA PARA CI/CD (GITHUB ACTIONS)
-
-Lee hoja 'Jumbo-info' por posición de columna para evitar errores de cabecera.
-(SKU=Col B, URL=Col D, Peso Jumbo=Col E).
-
-Scrapea el precio en la página de Jumbo con Selenium (Chrome headless) usando
-una pausa fija, que ha demostrado ser el método más efectivo.
+Lee hoja 'Jumbo-info' (SKU=B, URL=D, Peso Jumbo=E, Precio GM=F, Peso GM=G).
+Scrapea precio en la página de Jumbo con Selenium (Chrome headless).
+Calcula "Precio por 1 kg Jumbo" = precio_scrapeado / PesoJumbo_g * 1000 (redondeado).
 
 Actualiza:
-  * Hoja 'P-web' -> Columna I ("Jumbo Kg").
-  * Hoja 'Jumbo' (histórico) -> Agrega columna con fecha dd-mm-YYYY.
+  * Hoja 'P-web' -> Columna I ("Jumbo Kg"), por SKU:
+      - Si hay valor nuevo, lo escribe.
+      - Si NO hay valor nuevo (None), NO pisa el valor anterior.
+  * Hoja 'Jumbo' (histórico) -> agrega columna con fecha dd-mm-YYYY, por SKU:
+      - Si falta el SKU, lo agrega al final (col B = SKU).
+      - Si el valor es None, deja celda vacía.
 
 Variables de entorno requeridas:
 - GCP_SHEETS_CREDENTIALS  (contenido JSON de Service Account)
 - SHEET_ID                (ID del spreadsheet)
-- CHROME_BIN              (Ruta al binario de Chrome, ej: /usr/bin/google-chrome)
+- CHROME_BIN              (opcional; si viene, lo usamos como binario de Chrome)
+
+Ejecución:
+    python scraper.py
 """
 
 from __future__ import annotations
@@ -38,7 +41,8 @@ from google.oauth2.service_account import Credentials
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # =========================
 # Configuración de hojas / columnas
@@ -52,20 +56,23 @@ SHEET_JUMBO_INFO = "Jumbo-info"
 SHEET_PWEB = "P-web"
 SHEET_JUMBO_HIST = "Jumbo"
 
-# Posiciones de columnas (1-based index)
-COL_SKU_INFO = 2           # Columna B
-COL_URL_INFO = 4           # Columna D
-COL_PESO_JUMBO_INFO = 5    # Columna E
+# Jumbo-info: B=SKU, D=URL, E=Peso Jumbo (g), F=Precio GM, G=Peso GM
+COL_SKU_INFO = 2
+COL_URL_INFO = 4
+COL_PESO_JUMBO_INFO = 5
+COL_PRECIO_GM_INFO = 6
+COL_PESO_GM_INFO = 7
 
-COL_SKU_PWEB = 2           # Columna B
-COL_JUMBO_KG_PWEB = 9      # Columna I
+# P-web: B=SKU, I="Jumbo Kg"
+COL_SKU_PWEB = 2
+COL_JUMBO_KG_PWEB = 9  # Columna I
 
-COL_SKU_HIST = 2           # Columna B
-COL_FECHAS_INICIA_EN = 3   # Columna C
+# Jumbo (histórico): B=SKU, columnas de fechas a partir de C
+COL_SKU_HIST = 2
+COL_FECHAS_INICIA_EN = 3  # Columna C
 
-# Tiempos de espera para no sobrecargar el servidor y evitar bloqueos
-SLEEP_MIN = 2.0
-SLEEP_MAX = 3.5
+SLEEP_MIN = 0.6
+SLEEP_MAX = 1.2
 
 # =========================
 # Autenticación Google
@@ -74,17 +81,15 @@ SLEEP_MAX = 3.5
 def _get_gspread_client():
     creds_json = os.getenv("GCP_SHEETS_CREDENTIALS", "")
     if not creds_json:
-        raise RuntimeError("Falta GCP_SHEETS_CREDENTIALS en variables de entorno.")
-    try:
-        info = json.loads(creds_json)
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        credentials = Credentials.from_service_account_info(info, scopes=scopes)
-        return gspread.authorize(credentials)
-    except json.JSONDecodeError:
-        raise RuntimeError("El contenido de GCP_SHEETS_CREDENTIALS no es un JSON válido.")
+        raise RuntimeError("Falta GCP_SHEETS_CREDENTIALS en variables de entorno (pegar JSON completo).")
+
+    info = json.loads(creds_json)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    credentials = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(credentials)
 
 def open_sheet():
     gc = _get_gspread_client()
@@ -94,33 +99,70 @@ def open_sheet():
 # Utilidades de precio
 # =========================
 
+PRECIO_REGEXES = [
+    re.compile(r"\$\s*([\d\.]+)"),  # $ 7.990
+    re.compile(r"CLP\s*([\d\.]+)"), # CLP 7.990
+]
+PALABRAS_EXCLUIR = {"prime", "paga", "antes", "suscríbete", "suscribete"}
+
+# Detecta patrones como: "($9.988 x kg)" o "$9.988 x kg"
+PRECIO_POR_KG_REGEX = re.compile(r"\$\s*([\d\.,]+)\s*x\s*kg", re.IGNORECASE)
+
+def normaliza(texto: str) -> str:
+    return " ".join(str(texto).split()).strip()
+
 def extraer_precio(texto: str) -> Optional[int]:
-    if not texto: return None
-    match = re.search(r"\$[\s]?([\d\.]+)", texto)
-    if match:
-        precio_str = match.group(1).replace(".", "").replace(",", "")
-        if precio_str.isdigit():
-            return int(precio_str)
+    t = texto.strip()
+    for rx in PRECIO_REGEXES:
+        m = rx.search(t)
+        if m:
+            bruto = m.group(1).replace(".", "").replace(",", "")
+            if bruto.isdigit():
+                return int(bruto)
     return None
 
+def es_precio_valido(txt: str) -> bool:
+    t = txt.lower()
+    if not ("$" in t or "clp" in t):
+        return False
+    if any(p in t for p in PALABRAS_EXCLUIR):
+        return False
+    if t.startswith(("antes", "normal", "precio normal")):
+        return False
+    return True
+
 def precio_por_kg(precio: Optional[int], peso_gr: Optional[float]) -> Optional[int]:
-    if precio is None or peso_gr is None or peso_gr <= 0:
+    if precio is None or peso_gr is None:
         return None
     try:
-        return round(int(precio) / float(peso_gr) * 1000)
-    except (ValueError, TypeError):
+        peso_gr = float(peso_gr)
+        if peso_gr <= 0:
+            return None
+        return round(int(precio) / peso_gr * 1000)
+    except Exception:
         return None
 
 # =========================
-# Selenium (Chrome headless)
+# Selenium (Chrome headless) con perfil único
 # =========================
 
 def build_browser():
+    """
+    Chrome headless para CI:
+    - Perfil único por ejecución (evita "user data dir is already in use")
+    - Usa CHROME_BIN si está definido; Selenium Manager resuelve el driver
+    """
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-features=TranslateUI")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(
@@ -131,154 +173,206 @@ def build_browser():
     profile_dir = os.path.join(tempfile.gettempdir(), f"chrome-profile-{uuid.uuid4()}")
     os.makedirs(profile_dir, exist_ok=True)
     options.add_argument(f"--user-data-dir={profile_dir}")
+    options.add_argument("--remote-debugging-port=9222")
 
     chrome_bin = os.environ.get("CHROME_BIN", "").strip()
     if chrome_bin and os.path.exists(chrome_bin):
-        print(f"Usando binario de Chrome desde CHROME_BIN: {chrome_bin}")
         options.binary_location = chrome_bin
-    else:
-        print("CHROME_BIN no definido o no encontrado, dejando que Selenium Manager decida.")
 
+    # Selenium Manager elegirá el driver apropiado
     driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(60)
+    driver.set_page_load_timeout(90)
     return driver
 
-def obtener_precio(url: str, driver: webdriver.Chrome) -> Tuple[Optional[int], str]:
+def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
+    textos = []
+    selectores_css = [
+        "[class*='price']",
+        "[data-testid*='price']",
+        "[data-qa*='price']",
+        ".price, .product-price, .sale-price, .current-price",
+        "span, div, p, strong, b"
+    ]
+    for sel in selectores_css:
+        for e in driver.find_elements(By.CSS_SELECTOR, sel):
+            txt = normaliza(e.text)
+            if txt:
+                textos.append(txt)
+
+    textos = [t for t in textos if es_precio_valido(t)]
+    for t in textos:
+        p = extraer_precio(t)
+        if p is not None and p > 0:
+            return p
+    return None
+
+def encontrar_precio_por_kg_en_dom(driver: webdriver.Chrome) -> Optional[int]:
+    """Busca explícitamente cadenas con el patrón "$N x kg" y devuelve N como entero CLP/kg."""
+    candidatos = []
+    selectores_css = [
+        "span, div, p, strong, b",  # amplio para capturar badges tipo "1 un ($9.988 x kg)"
+        "[class*='kg']",
+        "[data-testid*='kg']",
+    ]
+    for sel in selectores_css:
+        for e in driver.find_elements(By.CSS_SELECTOR, sel):
+            txt = normaliza(e.text)
+            if not txt:
+                continue
+            if "kg" not in txt.lower():
+                continue
+            m = PRECIO_POR_KG_REGEX.search(txt)
+            if m:
+                bruto = m.group(1).replace(".", "").replace(",", "")
+                if bruto.isdigit():
+                    valor = int(bruto)
+                    if valor > 0:
+                        return valor
+            candidatos.append(txt)
+    # Si no se encontró con regex directo, intentar extraer del texto completo de la página
     try:
-        driver.get(url)
-        # Pausa fija: simple, pero la más efectiva para este caso.
-        # Aumentada ligeramente para dar más margen en el entorno de CI.
-        pausa = random.uniform(2.5, 4.0)
-        print(f"    -> Esperando {pausa:.1f} segundos para carga de JS...")
-        time.sleep(pausa)
+        html_text = driver.find_element(By.TAG_NAME, "body").text
+        m = PRECIO_POR_KG_REGEX.search(html_text)
+        if m:
+            bruto = m.group(1).replace(".", "").replace(",", "")
+            if bruto.isdigit():
+                valor = int(bruto)
+                if valor > 0:
+                    return valor
+    except Exception:
+        pass
+    return None
 
-        spans = driver.find_elements(By.TAG_NAME, 'span')
-        print(f"    -> Encontrados {len(spans)} elementos <span>.")
+def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 25, retries: int = 3) -> Tuple[Optional[int], str]:
+    last_err = ""
+    for intento in range(1, retries + 2):
+        try:
+            driver.get(url)
+            try:
+                # Esperar que aparezca al menos un "$" o "kg" en pantalla
+                WebDriverWait(driver, timeout_s).until(
+                    EC.presence_of_element_located((By.XPATH, "//*[contains(translate(., 'KG', 'kg'), 'kg') or contains(., '$') ]"))
+                )
+            except Exception:
+                pass
+            # 1) Intentar primero el precio por kg directo (badge tipo "($9.988 x kg)")
+            precio_kg = encontrar_precio_por_kg_en_dom(driver)
+            if precio_kg and precio_kg > 0:
+                return precio_kg, "ok_perkg"
 
-        posibles_precios = []
-        for span in spans:
-            txt = span.text.strip()
-            if "$" in txt and len(txt) < 30: # Filtrar textos largos
-                posibles_precios.append(txt)
-                # Buscar el que tiene 'font-bold' para priorizarlo
-                if 'font-bold' in span.get_attribute('class'):
-                    if not ("paga" in txt.lower() or "prime" in txt.lower()):
-                        precio = extraer_precio(txt)
-                        if precio and precio > 0:
-                            print(f"    -> ✅ Precio prioritario (font-bold) encontrado: '{txt}'")
-                            return precio, "ok"
-
-        # Si no se encontró uno prioritario, revisar los demás candidatos
-        print(f"    -> Revisando {len(posibles_precios)} candidatos de precio...")
-        for txt in posibles_precios:
-            if not ("paga" in txt.lower() or "prime" in txt.lower()):
-                precio = extraer_precio(txt)
-                if precio and precio > 0:
-                    print(f"    -> ✅ Precio candidato válido encontrado: '{txt}'")
-                    return precio, "ok"
-
-    except WebDriverException as e:
-        print(f"    -> ❌ Error de WebDriver: {e.msg}")
-        return None, f"error_navegacion:{type(e).__name__}"
-    except Exception as e:
-        print(f"    -> ❌ Error inesperado: {str(e)}")
-        return None, f"error_inesperado:{type(e).__name__}"
-
-    return None, "precio_no_encontrado"
+            # 2) Fallback: extraer precio total y dejar que el caller calcule por kg
+            precio = encontrar_precio_en_dom(driver)
+            if precio and precio > 0:
+                return precio, "ok_total"
+            last_err = "precio_no_encontrado"
+        except Exception as e:
+            last_err = f"error_navegacion:{type(e).__name__}"
+        time.sleep(1.0 + 0.5 * intento)
+    return None, last_err or "desconocido"
 
 # =========================
 # Google Sheets helpers
 # =========================
 
 def leer_jumbo_info(sh) -> List[Dict[str, Any]]:
-    """
-    Lee 'Jumbo-info' usando índices de columna para máxima robustez.
-    """
+    """Lee todas las filas de 'Jumbo-info' y devuelve una lista de dicts."""
     ws = sh.worksheet(SHEET_JUMBO_INFO)
     values = ws.get_all_values()
-    if len(values) < 2: return [] # Si no hay datos además de la cabecera
+    if len(values) < 2:
+        return []
 
     rows = []
-    # Empezar desde la segunda fila (índice 1) para saltar la cabecera
-    for i, row_list in enumerate(values[1:], start=2):
-        # Asegurarse de que la fila tiene suficientes columnas
-        if len(row_list) < COL_PESO_JUMBO_INFO:
-            continue
+    for r in range(2, len(values) + 1):
+        row = values[r-1]
+        while len(row) < 7:
+            row.append("")
 
-        sku = str(row_list[COL_SKU_INFO - 1]).strip()
-        url = str(row_list[COL_URL_INFO - 1]).strip()
-        peso_j_str = str(row_list[COL_PESO_JUMBO_INFO - 1]).strip()
+        sku = str(row[COL_SKU_INFO-1]).strip()
+        url = str(row[COL_URL_INFO-1]).strip()
+        peso_j = row[COL_PESO_JUMBO_INFO-1]
+        precio_gm = row[COL_PRECIO_GM_INFO-1]
+        peso_gm = row[COL_PESO_GM_INFO-1]
 
-        def to_num(x_str):
-            if not x_str: return None
+        def to_num(x):
             try:
-                return float(x_str.replace(",", "."))
-            except (ValueError, TypeError):
+                return float(str(x).replace(",", "."))
+            except Exception:
                 return None
 
         rows.append({
-            "row_index": i,
+            "row_index": r,
             "SKU": sku,
             "URL": url,
-            "PesoJumbo_g": to_num(peso_j_str),
+            "PesoJumbo_g": to_num(peso_j),
+            "PrecioGM": to_num(precio_gm),
+            "PesoGM_g": to_num(peso_gm)
         })
     return rows
 
-
 def mapear_sku_a_fila(ws, col_sku_idx: int) -> Dict[str, int]:
+    """Devuelve dict SKU -> row_index (1-based) leyendo una columna de la hoja."""
     values = ws.col_values(col_sku_idx)
-    mapping = {str(v).strip(): i for i, v in enumerate(values, start=1) if v and str(v).strip()}
+    mapping = {}
+    for i, v in enumerate(values, start=1):
+        if i == 1:
+            continue  # header
+        sku = str(v).strip()
+        if sku:
+            mapping[sku] = i
     return mapping
 
 def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
-    print("Mapeando SKUs en 'P-web'...")
+    """Actualiza P-web (columna I = Jumbo Kg) por SKU, sin pisar si el nuevo valor es None."""
     sku_to_row = mapear_sku_a_fila(ws_pweb, COL_SKU_PWEB)
     updates = []
     for sku, nuevo in dict_sku_precio_kg.items():
-        if not sku or nuevo is None: continue
         row = sku_to_row.get(sku)
-        if row:
-            updates.append({"range": f"I{row}", "values": [[nuevo]]})
+        if not row or row == 1:
+            continue
+        if nuevo is None or nuevo == "":
+            continue  # no pisar si no hay valor
+        a1 = f"I{row}"
+        updates.append({"range": a1, "values": [[nuevo]]})
     if updates:
-        print(f"Enviando {len(updates)} actualizaciones a 'P-web'...")
         ws_pweb.batch_update(updates)
-    else:
-        print("No hay actualizaciones para 'P-web'.")
 
 def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str):
-    print("Mapeando SKUs en 'Jumbo' (histórico)...")
+    """Agrega una columna nueva con la fecha y escribe por SKU los valores (usando batch_update seguro)."""
     sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
+    # Determinar próxima columna disponible (>= C)
     values = ws_hist.get_all_values()
-    num_cols = max(len(r) for r in values) if values else 0
-    new_col_idx = max(num_cols + 1, COL_FECHAS_INICIA_EN)
-    
+    if not values:
+        values = [[""]]
+    num_cols = max(len(r) for r in values) if values else 1
+    new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
+
+    # Encabezado de fecha en la fila 1 (usar batch_update con [[valor]], evita errores 400)
     header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
-    print(f"Agregando encabezado de fecha '{fecha_str}' en la celda {header_a1}...")
     ws_hist.batch_update([{"range": header_a1, "values": [[fecha_str]]}])
 
-    # Agregar SKUs nuevos y preparar actualizaciones en una sola pasada
-    updates = []
-    skus_a_anadir = []
-    for sku, val in dict_sku_precio_kg.items():
-        if not sku: continue
-        valor_celda = val if val is not None else ""
-        if sku in sku_to_row:
-            r = sku_to_row[sku]
-            a1 = f"{col_idx_to_letter(new_col_idx)}{r}"
-            updates.append({"range": a1, "values": [[valor_celda]]})
-        else:
-            skus_a_anadir.append(["", sku] + [""] * (new_col_idx - 2) + [valor_celda])
+    # Agregar SKUs que no existan
+    to_append = []
+    for sku in dict_sku_precio_kg.keys():
+        if sku and sku not in sku_to_row:
+            to_append.append(["", sku])  # col A vacío, col B = SKU
+    if to_append:
+        ws_hist.append_rows(to_append, value_input_option="RAW")
+        sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
-    if skus_a_anadir:
-        print(f"Agregando {len(skus_a_anadir)} SKUs nuevos al histórico...")
-        ws_hist.append_rows(skus_a_anadir, value_input_option="USER_ENTERED")
-    
+    # Escribir valores en la nueva columna
+    updates = []
+    for sku, val in dict_sku_precio_kg.items():
+        r = sku_to_row.get(sku)
+        if not r or r == 1:
+            continue
+        a1 = f"{col_idx_to_letter(new_col_idx)}{r}"
+        updates.append({"range": a1, "values": [[ "" if val is None else val ]]})
     if updates:
-        print(f"Enviando {len(updates)} actualizaciones a SKUs existentes en 'Jumbo'...")
         ws_hist.batch_update(updates)
 
 def col_idx_to_letter(idx: int) -> str:
+    """Convierte índice de columna (1-based) a letra tipo A1."""
     letters = ""
     while idx > 0:
         idx, rem = divmod(idx - 1, 26)
@@ -290,63 +384,63 @@ def col_idx_to_letter(idx: int) -> str:
 # =========================
 
 def main():
+    # Fecha local America/Santiago
     tz_scl = tz.gettz("America/Santiago")
     fecha_str = datetime.now(tz_scl).strftime("%d-%m-%Y")
-    print(f"--- Iniciando scraper - {fecha_str} ---")
 
     sh = open_sheet()
-    productos = leer_jumbo_info(sh)
+    ws_pweb = sh.worksheet(SHEET_PWEB)
+    ws_hist = sh.worksheet(SHEET_JUMBO_HIST)
 
+    productos = leer_jumbo_info(sh)
     if not productos:
-        print("No se encontraron filas con datos válidos en la hoja 'Jumbo-info'. El script finalizará.")
+        print("No hay filas en Jumbo-info.")
         return
 
-    print(f"Se encontraron {len(productos)} productos para procesar.")
+    print(f"Filas a procesar: {len(productos)}")
+
     driver = build_browser()
     dict_sku_precio_kg_jumbo: Dict[str, Optional[int]] = {}
 
     try:
         for i, item in enumerate(productos, start=1):
-            sku, url, peso_j = item["SKU"], item["URL"], item["PesoJumbo_g"]
-            print(f"\n[{i}/{len(productos)}] Procesando SKU: {sku or 'N/A'}")
+            sku = item["SKU"]
+            url = item["URL"]
+            peso_j = item["PesoJumbo_g"]
 
-            if not sku or not url or not peso_j:
-                print(f"  -> Datos incompletos en la hoja. SKU='{sku}', URL='{url}', Peso='{peso_j}'. Saltando.")
-                if sku: dict_sku_precio_kg_jumbo[sku] = None
-                continue
-            
-            precio, status = obtener_precio(url, driver)
-            
-            if precio:
-                dict_sku_precio_kg_jumbo[sku] = precio_por_kg(precio, peso_j)
-            else:
-                print(f"  -> ❌ No se encontró precio final. Estado: {status}")
+            if not sku or not url or not peso_j or float(peso_j) <= 0:
                 dict_sku_precio_kg_jumbo[sku] = None
-            
-            # Pausa entre cada petición
-            time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
+                continue
 
+            precio, status = obtener_precio(url, driver)
+            if precio is None:
+                dict_sku_precio_kg_jumbo[sku] = None
+            else:
+                # Si ya es precio por kg, usarlo directo; si es total, calcular por kg
+                if status == "ok_perkg":
+                    dict_sku_precio_kg_jumbo[sku] = int(precio)
+                else:
+                    dict_sku_precio_kg_jumbo[sku] = precio_por_kg(precio, peso_j)
+
+            if i % 10 == 0:
+                print(f"Procesados {i}/{len(productos)}")
+            time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
     finally:
-        print("\n--- Cerrando navegador ---")
         driver.quit()
 
-    print("\n--- Actualizando Google Sheets ---")
-    ws_pweb = sh.worksheet(SHEET_PWEB)
-    ws_hist = sh.worksheet(SHEET_JUMBO_HIST)
-    
+    # 1) Actualizar P-web (columna I), sin pisar valores cuando no hay nuevo
     escribir_pweb(ws_pweb, dict_sku_precio_kg_jumbo)
-    print("✅ 'P-web' actualizado.")
+    print("P-web actualizado (columna I / Jumbo Kg).")
 
+    # 2) Actualizar Jumbo (histórico) agregando una nueva columna con la fecha
     escribir_jumbo_historico(ws_hist, dict_sku_precio_kg_jumbo, fecha_str)
-    print(f"✅ 'Jumbo' histórico actualizado.")
+    print(f"Jumbo histórico actualizado ({fecha_str}).")
 
+    # Métricas
     total = len(dict_sku_precio_kg_jumbo)
     con_valor = sum(1 for v in dict_sku_precio_kg_jumbo.values() if v is not None)
-    print("\n--- Resumen Final ---")
-    print(f"Total de SKUs procesados: {total}")
-    print(f"Con valor: {con_valor}")
-    print(f"Sin valor: {total - con_valor}")
-    print("--------------------")
+    sin_valor = total - con_valor
+    print(f"Resumen: total={total}, con_valor={con_valor}, sin_valor={sin_valor}")
 
 if __name__ == "__main__":
     main()
