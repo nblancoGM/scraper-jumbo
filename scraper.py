@@ -71,8 +71,8 @@ COL_JUMBO_KG_PWEB = 9  # Columna I
 COL_SKU_HIST = 2
 COL_FECHAS_INICIA_EN = 3  # Columna C
 
-SLEEP_MIN = 1.0  # Aumentado para dar más tiempo
-SLEEP_MAX = 2.0  # Aumentado para dar más tiempo
+SLEEP_MIN = 1.0
+SLEEP_MAX = 2.0
 
 # =========================
 # Autenticación Google
@@ -96,25 +96,15 @@ def open_sheet():
     return gc.open_by_key(SHEET_ID)
 
 # =========================
-# Utilidades de precio (MEJORADAS - más como el código viejo)
+# Utilidades de precio (EXACTAMENTE como el código viejo que funcionaba)
 # =========================
 
 def extraer_precio(texto):
-    """Función más simple y efectiva como en el código viejo"""
+    """Función EXACTA del código viejo que funcionaba"""
     match = re.search(r"\$[\s]?([\d\.]+)", texto)
     if match:
         return int(match.group(1).replace(".", ""))
     return None
-
-def es_precio_valido(txt: str) -> bool:
-    """Validación más permisiva, similar al código viejo"""
-    t = txt.lower()
-    if not "$" in t:
-        return False
-    # Solo excluir si contiene estas palabras específicas (como el código viejo)
-    if "paga" in t or "prime" in t:
-        return False
-    return True
 
 def precio_por_kg(precio: Optional[int], peso_gr: Optional[float]) -> Optional[int]:
     if precio is None or peso_gr is None:
@@ -166,92 +156,20 @@ def build_browser():
 
     # Selenium Manager elegirá el driver apropiado
     driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(120)  # Aumentado timeout
+    driver.set_page_load_timeout(120)
     return driver
 
-def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
-    """
-    Estrategia híbrida: combinar la estrategia del código viejo con nuevos selectores
-    """
-    print("🔍 Buscando precios en la página...")
-    
-    # ESTRATEGIA 1: Como el código viejo - buscar elementos con clase 'font-bold'
-    try:
-        spans_font_bold = driver.find_elements(By.CLASS_NAME, 'font-bold')
-        print(f"   Encontrados {len(spans_font_bold)} elementos con clase 'font-bold'")
-        
-        for span in spans_font_bold:
-            txt = span.text.strip()
-            if txt and es_precio_valido(txt):
-                precio = extraer_precio(txt)
-                if precio and precio > 0:
-                    print(f"   ✅ Precio encontrado con estrategia vieja: {txt} -> {precio}")
-                    return precio
-                    
-    except Exception as e:
-        print(f"   ❌ Error en estrategia font-bold: {e}")
-
-    # ESTRATEGIA 2: Selectores CSS más específicos
-    selectores_css = [
-        ".text-neutral700",
-        "[class*='price']",
-        "[data-testid*='price']", 
-        "[data-qa*='price']",
-        ".price, .product-price, .sale-price, .current-price",
-        # Agregar más selectores genéricos
-        "span[class*='font-bold']",
-        "div[class*='font-bold']",
-        "span[class*='price']",
-        "div[class*='price']"
-    ]
-    
-    for sel in selectores_css:
-        try:
-            elementos = driver.find_elements(By.CSS_SELECTOR, sel)
-            print(f"   Selector '{sel}': {len(elementos)} elementos")
-            
-            for e in elementos:
-                txt = e.text.strip()
-                if txt and es_precio_valido(txt):
-                    precio = extraer_precio(txt)
-                    if precio and precio > 0:
-                        print(f"   ✅ Precio encontrado con selector '{sel}': {txt} -> {precio}")
-                        return precio
-                        
-        except Exception as e:
-            print(f"   ❌ Error con selector '{sel}': {e}")
-
-    # ESTRATEGIA 3: Búsqueda amplia en todos los elementos que contengan "$"
-    try:
-        todos_elementos = driver.find_elements(By.XPATH, "//*[contains(text(), '$')]")
-        print(f"   Búsqueda amplia: {len(todos_elementos)} elementos con '$'")
-        
-        for e in todos_elementos:
-            txt = e.text.strip()
-            if txt and es_precio_valido(txt):
-                precio = extraer_precio(txt)
-                if precio and precio > 0:
-                    print(f"   ✅ Precio encontrado con búsqueda amplia: {txt} -> {precio}")
-                    return precio
-                    
-    except Exception as e:
-        print(f"   ❌ Error en búsqueda amplia: {e}")
-
-    print("   ❌ No se encontró ningún precio válido")
-    return None
-
 def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 20, retries: int = 2) -> Tuple[Optional[int], str]:
-    """Función mejorada con mejor manejo de errores y timeouts"""
+    """Función EXACTA del código viejo que funcionaba, adaptada para web driver"""
     print(f"🌐 Procesando URL: {url}")
-    last_err = ""
     
     for intento in range(1, retries + 2):
         try:
             print(f"   Intento {intento}")
             driver.get(url)
             
-            # Esperar que la página cargue - más tiempo que antes
-            time.sleep(3)  # Espera fija para asegurar carga completa
+            # Esperar que la página cargue
+            time.sleep(3)  # Igual que el código viejo
             
             # Intentar esperar por elementos con precio
             try:
@@ -262,26 +180,46 @@ def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 20, retr
             except Exception:
                 print("   ⚠️ Timeout esperando elemento con '$', pero continuando...")
                 pass
+
+            # ESTRATEGIA EXACTA DEL CÓDIGO VIEJO: buscar spans con clase 'font-bold'
+            spans = driver.find_elements(By.CLASS_NAME, 'font-bold')
+            print(f"   🔍 Encontrados {len(spans)} elementos con clase 'font-bold'")
             
-            precio = encontrar_precio_en_dom(driver)
-            if precio and precio > 0:
-                print(f"   ✅ PRECIO OBTENIDO: ${precio:,}")
-                return precio, "ok"
-            else:
-                last_err = "precio_no_encontrado"
-                print(f"   ❌ No se encontró precio en intento {intento}")
+            for span in spans:
+                txt = span.text.strip()
+                print(f"      📝 Texto encontrado: '{txt}'")
+                
+                # Aplicar EXACTAMENTE la misma lógica del código viejo
+                if "$" in txt:
+                    print(f"         💰 Contiene '$', verificando si es válido...")
+                    
+                    # Verificar si NO contiene palabras excluidas (igual que código viejo)
+                    txt_lower = txt.lower()
+                    if not ("paga" in txt_lower or "prime" in txt_lower):
+                        print(f"         ✅ Precio real encontrado: {txt}")
+                        precio = extraer_precio(txt)
+                        if precio and precio > 0:
+                            print(f"         💵 Precio extraído: ${precio:,}")
+                            return precio, "ok"
+                        else:
+                            print(f"         ❌ No se pudo extraer número del precio: {txt}")
+                    else:
+                        print(f"         ❌ Precio descartado (contiene 'paga' o 'prime'): {txt}")
+                else:
+                    print(f"         ⚠️ No contiene '$': {txt}")
+
+            print(f"   ❌ No se encontró precio válido en intento {intento}")
                 
         except Exception as e:
-            last_err = f"error_navegacion:{type(e).__name__}:{str(e)}"
-            print(f"   ❌ Error en intento {intento}: {last_err}")
+            print(f"   ❌ Error en intento {intento}: {type(e).__name__}:{str(e)}")
         
         if intento < retries + 1:
             wait_time = 2.0 + 1.0 * intento
             print(f"   ⏳ Esperando {wait_time}s antes del siguiente intento...")
             time.sleep(wait_time)
     
-    print(f"   ❌ FALLO FINAL: {last_err}")
-    return None, last_err or "desconocido"
+    print(f"   ❌ FALLO FINAL: No se encontró precio después de {retries + 1} intentos")
+    return None, "precio_no_encontrado"
 
 # =========================
 # Google Sheets helpers
@@ -436,12 +374,18 @@ def main():
     dict_sku_precio_kg_jumbo: Dict[str, Optional[int]] = {}
 
     try:
-        for i, item in enumerate(productos, start=1):
+        # PARA DEBUGGING: procesar solo los primeros 3 productos
+        productos_test = productos[:3]
+        print(f"🧪 MODO DEBUG: procesando solo {len(productos_test)} productos para debugging")
+        
+        for i, item in enumerate(productos_test, start=1):
             sku = item["SKU"]
             url = item["URL"]
             peso_j = item["PesoJumbo_g"]
 
-            print(f"\n--- PRODUCTO {i}/{len(productos)} - SKU: {sku} ---")
+            print(f"\n{'='*60}")
+            print(f"PRODUCTO {i}/{len(productos_test)} - SKU: {sku}")
+            print(f"{'='*60}")
 
             if not sku:
                 print("⚠️ SKU vacío, saltando...")
@@ -467,11 +411,7 @@ def main():
             else:
                 precio_kg = precio_por_kg(precio, peso_j)
                 dict_sku_precio_kg_jumbo[sku] = precio_kg
-                print(f"✅ SKU {sku}: ${precio:,} -> ${precio_kg:,}/kg")
-
-            # Progreso cada 5 productos
-            if i % 5 == 0:
-                print(f"\n📈 PROGRESO: {i}/{len(productos)} procesados")
+                print(f"🎉 SKU {sku}: ${precio:,} -> ${precio_kg:,}/kg")
                 
             time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
             
@@ -496,7 +436,8 @@ def main():
     print(f"   Total productos: {total}")
     print(f"   Con precio obtenido: {con_valor}")
     print(f"   Sin precio: {sin_valor}")
-    print(f"   Tasa de éxito: {(con_valor/total*100):.1f}%")
+    if total > 0:
+        print(f"   Tasa de éxito: {(con_valor/total*100):.1f}%")
     print("🎉 Proceso completado!")
 
 if __name__ == "__main__":
