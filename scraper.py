@@ -182,40 +182,25 @@ def build_browser():
     return driver
 
 def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
-    """
-    Busca el precio en el DOM usando selectores CSS actualizados y robustos.
-    Prioriza los selectores más específicos para evitar capturar precios incorrectos (ofertas, etc.).
-    """
     textos = []
-    # --- SELECTORES CORREGIDOS ---
-    # Se prioriza el selector más específico primero.
     selectores_css = [
-        "span.price-best-value",              # Selector principal y más confiable para el precio por unidad.
-        ".product-prices span",               # Un poco más general, captura cualquier texto dentro del bloque de precios.
-        "[class*='price-best']",              # Captura elementos que contienen 'price-best' en su clase.
+        "[class*='price']",
         "[data-testid*='price']",
-        "[data-qa*='price']"
+        "[data-qa*='price']",
+        ".price, .product-price, .sale-price, .current-price",
+        "span, div, p, strong, b"
     ]
-    # ---------------------------
-
     for sel in selectores_css:
-        try:
-            elementos = driver.find_elements(By.CSS_SELECTOR, sel)
-            for e in elementos:
-                txt = normaliza(e.text)
-                if txt:
-                    textos.append(txt)
-        except Exception:
-            # Ignora selectores que puedan fallar si la página cambia
-            continue
+        for e in driver.find_elements(By.CSS_SELECTOR, sel):
+            txt = normaliza(e.text)
+            if txt:
+                textos.append(txt)
 
-    textos_validos = [t for t in textos if es_precio_valido(t)]
-
-    for t in textos_validos:
+    textos = [t for t in textos if es_precio_valido(t)]
+    for t in textos:
         p = extraer_precio(t)
         if p is not None and p > 0:
-            return p  # Devuelve el primer precio válido que encuentre
-
+            return p
     return None
 
 def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 12, retries: int = 2) -> Tuple[Optional[int], str]:
