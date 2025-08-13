@@ -71,8 +71,8 @@ COL_JUMBO_KG_PWEB = 9  # Columna I
 COL_SKU_HIST = 2
 COL_FECHAS_INICIA_EN = 3  # Columna C
 
-SLEEP_MIN = 0.6
-SLEEP_MAX = 1.2
+SLEEP_MIN = 1.0  # Aumentado para dar más tiempo
+SLEEP_MAX = 2.0  # Aumentado para dar más tiempo
 
 # =========================
 # Autenticación Google
@@ -96,35 +96,23 @@ def open_sheet():
     return gc.open_by_key(SHEET_ID)
 
 # =========================
-# Utilidades de precio
+# Utilidades de precio (MEJORADAS - más como el código viejo)
 # =========================
 
-PRECIO_REGEXES = [
-    re.compile(r"\$\s*([\d\.]+)"),  # $ 7.990
-    re.compile(r"CLP\s*([\d\.]+)"), # CLP 7.990
-]
-PALABRAS_EXCLUIR = {"prime", "paga", "antes", "suscríbete", "suscribete"}
-
-def normaliza(texto: str) -> str:
-    return " ".join(str(texto).split()).strip()
-
-def extraer_precio(texto: str) -> Optional[int]:
-    t = texto.strip()
-    for rx in PRECIO_REGEXES:
-        m = rx.search(t)
-        if m:
-            bruto = m.group(1).replace(".", "").replace(",", "")
-            if bruto.isdigit():
-                return int(bruto)
+def extraer_precio(texto):
+    """Función más simple y efectiva como en el código viejo"""
+    match = re.search(r"\$[\s]?([\d\.]+)", texto)
+    if match:
+        return int(match.group(1).replace(".", ""))
     return None
 
 def es_precio_valido(txt: str) -> bool:
+    """Validación más permisiva, similar al código viejo"""
     t = txt.lower()
-    if not ("$" in t or "clp" in t):
+    if not "$" in t:
         return False
-    if any(p in t for p in PALABRAS_EXCLUIR):
-        return False
-    if t.startswith(("antes", "normal", "precio normal")):
+    # Solo excluir si contiene estas palabras específicas (como el código viejo)
+    if "paga" in t or "prime" in t:
         return False
     return True
 
@@ -178,50 +166,121 @@ def build_browser():
 
     # Selenium Manager elegirá el driver apropiado
     driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(90)
+    driver.set_page_load_timeout(120)  # Aumentado timeout
     return driver
 
 def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
-    textos = []
+    """
+    Estrategia híbrida: combinar la estrategia del código viejo con nuevos selectores
+    """
+    print("🔍 Buscando precios en la página...")
+    
+    # ESTRATEGIA 1: Como el código viejo - buscar elementos con clase 'font-bold'
+    try:
+        spans_font_bold = driver.find_elements(By.CLASS_NAME, 'font-bold')
+        print(f"   Encontrados {len(spans_font_bold)} elementos con clase 'font-bold'")
+        
+        for span in spans_font_bold:
+            txt = span.text.strip()
+            if txt and es_precio_valido(txt):
+                precio = extraer_precio(txt)
+                if precio and precio > 0:
+                    print(f"   ✅ Precio encontrado con estrategia vieja: {txt} -> {precio}")
+                    return precio
+                    
+    except Exception as e:
+        print(f"   ❌ Error en estrategia font-bold: {e}")
+
+    # ESTRATEGIA 2: Selectores CSS más específicos
     selectores_css = [
         ".text-neutral700",
         "[class*='price']",
-        "[data-testid*='price']",
+        "[data-testid*='price']", 
         "[data-qa*='price']",
         ".price, .product-price, .sale-price, .current-price",
-        "span, div, p, strong, b"
+        # Agregar más selectores genéricos
+        "span[class*='font-bold']",
+        "div[class*='font-bold']",
+        "span[class*='price']",
+        "div[class*='price']"
     ]
+    
     for sel in selectores_css:
-        for e in driver.find_elements(By.CSS_SELECTOR, sel):
-            txt = normaliza(e.text)
-            if txt:
-                textos.append(txt)
+        try:
+            elementos = driver.find_elements(By.CSS_SELECTOR, sel)
+            print(f"   Selector '{sel}': {len(elementos)} elementos")
+            
+            for e in elementos:
+                txt = e.text.strip()
+                if txt and es_precio_valido(txt):
+                    precio = extraer_precio(txt)
+                    if precio and precio > 0:
+                        print(f"   ✅ Precio encontrado con selector '{sel}': {txt} -> {precio}")
+                        return precio
+                        
+        except Exception as e:
+            print(f"   ❌ Error con selector '{sel}': {e}")
 
-    textos = [t for t in textos if es_precio_valido(t)]
-    for t in textos:
-        p = extraer_precio(t)
-        if p is not None and p > 0:
-            return p
+    # ESTRATEGIA 3: Búsqueda amplia en todos los elementos que contengan "$"
+    try:
+        todos_elementos = driver.find_elements(By.XPATH, "//*[contains(text(), '$')]")
+        print(f"   Búsqueda amplia: {len(todos_elementos)} elementos con '$'")
+        
+        for e in todos_elementos:
+            txt = e.text.strip()
+            if txt and es_precio_valido(txt):
+                precio = extraer_precio(txt)
+                if precio and precio > 0:
+                    print(f"   ✅ Precio encontrado con búsqueda amplia: {txt} -> {precio}")
+                    return precio
+                    
+    except Exception as e:
+        print(f"   ❌ Error en búsqueda amplia: {e}")
+
+    print("   ❌ No se encontró ningún precio válido")
     return None
 
-def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 12, retries: int = 2) -> Tuple[Optional[int], str]:
+def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 20, retries: int = 2) -> Tuple[Optional[int], str]:
+    """Función mejorada con mejor manejo de errores y timeouts"""
+    print(f"🌐 Procesando URL: {url}")
     last_err = ""
+    
     for intento in range(1, retries + 2):
         try:
+            print(f"   Intento {intento}")
             driver.get(url)
+            
+            # Esperar que la página cargue - más tiempo que antes
+            time.sleep(3)  # Espera fija para asegurar carga completa
+            
+            # Intentar esperar por elementos con precio
             try:
                 WebDriverWait(driver, timeout_s).until(
                     EC.presence_of_element_located((By.XPATH, "//*[contains(., '$')]"))
                 )
+                print("   ✅ Página cargada (encontrado elemento con '$')")
             except Exception:
+                print("   ⚠️ Timeout esperando elemento con '$', pero continuando...")
                 pass
+            
             precio = encontrar_precio_en_dom(driver)
             if precio and precio > 0:
+                print(f"   ✅ PRECIO OBTENIDO: ${precio:,}")
                 return precio, "ok"
-            last_err = "precio_no_encontrado"
+            else:
+                last_err = "precio_no_encontrado"
+                print(f"   ❌ No se encontró precio en intento {intento}")
+                
         except Exception as e:
-            last_err = f"error_navegacion:{type(e).__name__}"
-        time.sleep(1.0 + 0.5 * intento)
+            last_err = f"error_navegacion:{type(e).__name__}:{str(e)}"
+            print(f"   ❌ Error en intento {intento}: {last_err}")
+        
+        if intento < retries + 1:
+            wait_time = 2.0 + 1.0 * intento
+            print(f"   ⏳ Esperando {wait_time}s antes del siguiente intento...")
+            time.sleep(wait_time)
+    
+    print(f"   ❌ FALLO FINAL: {last_err}")
     return None, last_err or "desconocido"
 
 # =========================
@@ -279,6 +338,8 @@ def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
     """Actualiza P-web (columna I = Jumbo Kg) por SKU, sin pisar si el nuevo valor es None."""
     sku_to_row = mapear_sku_a_fila(ws_pweb, COL_SKU_PWEB)
     updates = []
+    actualizados = 0
+    
     for sku, nuevo in dict_sku_precio_kg.items():
         row = sku_to_row.get(sku)
         if not row or row == 1:
@@ -287,8 +348,13 @@ def escribir_pweb(ws_pweb, dict_sku_precio_kg: Dict[str, Optional[int]]):
             continue  # no pisar si no hay valor
         a1 = f"I{row}"
         updates.append({"range": a1, "values": [[nuevo]]})
+        actualizados += 1
+    
     if updates:
         ws_pweb.batch_update(updates)
+        print(f"✅ P-web actualizado: {actualizados} SKUs")
+    else:
+        print("⚠️ P-web: no hay valores para actualizar")
 
 def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str):
     """Agrega una columna nueva con la fecha y escribe por SKU los valores (usando batch_update seguro)."""
@@ -316,14 +382,21 @@ def escribir_jumbo_historico(ws_hist, dict_sku_precio_kg: Dict[str, Optional[int
 
     # Escribir valores en la nueva columna
     updates = []
+    valores_escritos = 0
     for sku, val in dict_sku_precio_kg.items():
         r = sku_to_row.get(sku)
         if not r or r == 1:
             continue
         a1 = f"{col_idx_to_letter(new_col_idx)}{r}"
         updates.append({"range": a1, "values": [[ "" if val is None else val ]]})
+        if val is not None:
+            valores_escritos += 1
+            
     if updates:
         ws_hist.batch_update(updates)
+        print(f"✅ Histórico actualizado: {valores_escritos} valores en columna {fecha_str}")
+    else:
+        print("⚠️ Histórico: no hay valores para escribir")
 
 def col_idx_to_letter(idx: int) -> str:
     """Convierte índice de columna (1-based) a letra tipo A1."""
@@ -338,21 +411,27 @@ def col_idx_to_letter(idx: int) -> str:
 # =========================
 
 def main():
+    print("🚀 Iniciando scraper de Jumbo...")
+    
     # Fecha local America/Santiago
     tz_scl = tz.gettz("America/Santiago")
     fecha_str = datetime.now(tz_scl).strftime("%d-%m-%Y")
+    print(f"📅 Fecha: {fecha_str}")
 
+    print("🔗 Conectando a Google Sheets...")
     sh = open_sheet()
     ws_pweb = sh.worksheet(SHEET_PWEB)
     ws_hist = sh.worksheet(SHEET_JUMBO_HIST)
 
+    print("📊 Leyendo productos de Jumbo-info...")
     productos = leer_jumbo_info(sh)
     if not productos:
-        print("No hay filas en Jumbo-info.")
+        print("❌ No hay filas en Jumbo-info.")
         return
 
-    print(f"Filas a procesar: {len(productos)}")
+    print(f"📦 Productos a procesar: {len(productos)}")
 
+    print("🌐 Iniciando navegador Chrome...")
     driver = build_browser()
     dict_sku_precio_kg_jumbo: Dict[str, Optional[int]] = {}
 
@@ -362,35 +441,63 @@ def main():
             url = item["URL"]
             peso_j = item["PesoJumbo_g"]
 
-            if not sku or not url or not peso_j or float(peso_j) <= 0:
+            print(f"\n--- PRODUCTO {i}/{len(productos)} - SKU: {sku} ---")
+
+            if not sku:
+                print("⚠️ SKU vacío, saltando...")
+                dict_sku_precio_kg_jumbo[sku] = None
+                continue
+                
+            if not url:
+                print("⚠️ URL vacía, saltando...")
+                dict_sku_precio_kg_jumbo[sku] = None
+                continue
+                
+            if not peso_j or float(peso_j) <= 0:
+                print(f"⚠️ Peso inválido ({peso_j}g), saltando...")
                 dict_sku_precio_kg_jumbo[sku] = None
                 continue
 
+            print(f"✅ Datos válidos - Peso: {peso_j}g")
             precio, status = obtener_precio(url, driver)
+            
             if precio is None:
+                print(f"❌ No se obtuvo precio para SKU {sku} (status: {status})")
                 dict_sku_precio_kg_jumbo[sku] = None
             else:
-                dict_sku_precio_kg_jumbo[sku] = precio_por_kg(precio, peso_j)
+                precio_kg = precio_por_kg(precio, peso_j)
+                dict_sku_precio_kg_jumbo[sku] = precio_kg
+                print(f"✅ SKU {sku}: ${precio:,} -> ${precio_kg:,}/kg")
 
-            if i % 10 == 0:
-                print(f"Procesados {i}/{len(productos)}")
+            # Progreso cada 5 productos
+            if i % 5 == 0:
+                print(f"\n📈 PROGRESO: {i}/{len(productos)} procesados")
+                
             time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
+            
     finally:
+        print("🔒 Cerrando navegador...")
         driver.quit()
 
+    print(f"\n📝 Actualizando Google Sheets...")
+    
     # 1) Actualizar P-web (columna I), sin pisar valores cuando no hay nuevo
     escribir_pweb(ws_pweb, dict_sku_precio_kg_jumbo)
-    print("P-web actualizado (columna I / Jumbo Kg).")
 
     # 2) Actualizar Jumbo (histórico) agregando una nueva columna con la fecha
     escribir_jumbo_historico(ws_hist, dict_sku_precio_kg_jumbo, fecha_str)
-    print(f"Jumbo histórico actualizado ({fecha_str}).")
 
-    # Métricas
+    # Métricas finales
     total = len(dict_sku_precio_kg_jumbo)
     con_valor = sum(1 for v in dict_sku_precio_kg_jumbo.values() if v is not None)
     sin_valor = total - con_valor
-    print(f"Resumen: total={total}, con_valor={con_valor}, sin_valor={sin_valor}")
+    
+    print(f"\n📊 RESUMEN FINAL:")
+    print(f"   Total productos: {total}")
+    print(f"   Con precio obtenido: {con_valor}")
+    print(f"   Sin precio: {sin_valor}")
+    print(f"   Tasa de éxito: {(con_valor/total*100):.1f}%")
+    print("🎉 Proceso completado!")
 
 if __name__ == "__main__":
     main()
