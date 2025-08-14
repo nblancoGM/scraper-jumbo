@@ -105,9 +105,6 @@ PRECIO_REGEXES = [
 ]
 PALABRAS_EXCLUIR = {"prime", "paga", "antes", "suscríbete", "suscribete"}
 
-# Detecta patrones como: "($9.988 x kg)" o "$9.988 x kg"
-PRECIO_POR_KG_REGEX = re.compile(r"\$\s*([\d\.,]+)\s*x\s*kg", re.IGNORECASE)
-
 def normaliza(texto: str) -> str:
     return " ".join(str(texto).split()).strip()
 
@@ -206,64 +203,20 @@ def encontrar_precio_en_dom(driver: webdriver.Chrome) -> Optional[int]:
             return p
     return None
 
-def encontrar_precio_por_kg_en_dom(driver: webdriver.Chrome) -> Optional[int]:
-    """Busca explícitamente cadenas con el patrón "$N x kg" y devuelve N como entero CLP/kg."""
-    candidatos = []
-    selectores_css = [
-        "span, div, p, strong, b",  # amplio para capturar badges tipo "1 un ($9.988 x kg)"
-        "[class*='kg']",
-        "[data-testid*='kg']",
-    ]
-    for sel in selectores_css:
-        for e in driver.find_elements(By.CSS_SELECTOR, sel):
-            txt = normaliza(e.text)
-            if not txt:
-                continue
-            if "kg" not in txt.lower():
-                continue
-            m = PRECIO_POR_KG_REGEX.search(txt)
-            if m:
-                bruto = m.group(1).replace(".", "").replace(",", "")
-                if bruto.isdigit():
-                    valor = int(bruto)
-                    if valor > 0:
-                        return valor
-            candidatos.append(txt)
-    # Si no se encontró con regex directo, intentar extraer del texto completo de la página
-    try:
-        html_text = driver.find_element(By.TAG_NAME, "body").text
-        m = PRECIO_POR_KG_REGEX.search(html_text)
-        if m:
-            bruto = m.group(1).replace(".", "").replace(",", "")
-            if bruto.isdigit():
-                valor = int(bruto)
-                if valor > 0:
-                    return valor
-    except Exception:
-        pass
-    return None
-
-def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 25, retries: int = 3) -> Tuple[Optional[int], str]:
+def obtener_precio(url: str, driver: webdriver.Chrome, timeout_s: int = 12, retries: int = 2) -> Tuple[Optional[int], str]:
     last_err = ""
     for intento in range(1, retries + 2):
         try:
             driver.get(url)
             try:
-                # Esperar que aparezca al menos un "$" o "kg" en pantalla
                 WebDriverWait(driver, timeout_s).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(translate(., 'KG', 'kg'), 'kg') or contains(., '$') ]"))
+                    EC.presence_of_element_located((By.XPATH, "//*[contains(., '$')]"))
                 )
             except Exception:
                 pass
-            # 1) Intentar primero el precio por kg directo (badge tipo "($9.988 x kg)")
-            precio_kg = encontrar_precio_por_kg_en_dom(driver)
-            if precio_kg and precio_kg > 0:
-                return precio_kg, "ok_perkg"
-
-            # 2) Fallback: extraer precio total y dejar que el caller calcule por kg
             precio = encontrar_precio_en_dom(driver)
             if precio and precio > 0:
-                return precio, "ok_total"
+                return precio, "ok"
             last_err = "precio_no_encontrado"
         except Exception as e:
             last_err = f"error_navegacion:{type(e).__name__}"
@@ -416,11 +369,7 @@ def main():
             if precio is None:
                 dict_sku_precio_kg_jumbo[sku] = None
             else:
-                # Si ya es precio por kg, usarlo directo; si es total, calcular por kg
-                if status == "ok_perkg":
-                    dict_sku_precio_kg_jumbo[sku] = int(precio)
-                else:
-                    dict_sku_precio_kg_jumbo[sku] = precio_por_kg(precio, peso_j)
+                dict_sku_precio_kg_jumbo[sku] = precio_por_kg(precio, peso_j)
 
             if i % 10 == 0:
                 print(f"Procesados {i}/{len(productos)}")
