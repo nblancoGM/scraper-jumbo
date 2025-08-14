@@ -56,4 +56,4 @@ jobs:
             echo "ERROR: GCP_SHEETS_CREDENTIALS está vacío. Define el secret en Settings → Secrets and variables → Actions." >&2
             exit 1
           fi
-          python scraper.py
+          python scraper_improved.py
