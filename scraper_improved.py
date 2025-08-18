@@ -1,4 +1,4 @@
-AQUI TIENES QUE PEGAR EL CODIGO O NO SE QUE HACEs, PERO ACA NO NECESITAS NINGUN PERMISO# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Scraper para obtener el precio y el precio por kilo desde Jumbo y
 actualizar una planilla de Google Sheets.
