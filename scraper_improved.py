@@ -8,7 +8,7 @@ La versión original calculaba este valor dividiendo el precio unitario
 por el peso proporcionado en la hoja «Jumbo-info».  Ese enfoque no
 siempre funcionaba cuando la página de Jumbo mostraba el precio por kilo
 de manera explícita (por ejemplo, dentro de paréntesis o utilizando
-formatos como “$7.990/kg” o “$16.990 x kg”).  Esta versión trata de
+formatos como "$7.990/kg" o "$16.990 x kg").  Esta versión trata de
 extraer directamente ese valor del DOM.  Si no logra encontrarlo,
 recurrirá al cálculo clásico usando el peso.
 
@@ -410,6 +410,46 @@ def escribir_pweb(ws_pweb: gspread.Worksheet, dict_sku_precio_kg: Dict[str, Opti
         ws_pweb.batch_update(updates)
 
 
+def expandir_hoja_si_necesario(ws: gspread.Worksheet, columnas_necesarias: int) -> None:
+    """Expande la hoja si no tiene suficientes columnas.
+    
+    Args:
+        ws: La worksheet a expandir
+        columnas_necesarias: Número mínimo de columnas que debe tener la hoja
+    """
+    try:
+        # Obtener información actual de la hoja
+        sheet_metadata = ws.spreadsheet.fetch_sheet_metadata()
+        sheet_info = None
+        
+        # Buscar nuestra hoja específica en los metadatos
+        for sheet in sheet_metadata.get('sheets', []):
+            if sheet['properties']['title'] == ws.title:
+                sheet_info = sheet
+                break
+        
+        if not sheet_info:
+            print(f"No se pudo encontrar información de la hoja '{ws.title}'")
+            return
+        
+        current_cols = sheet_info['properties']['gridProperties']['columnCount']
+        
+        if columnas_necesarias > current_cols:
+            columnas_a_agregar = columnas_necesarias - current_cols
+            print(f"Expandiendo hoja '{ws.title}' de {current_cols} a {columnas_necesarias} columnas...")
+            
+            # Usar add_cols para expandir la hoja
+            ws.add_cols(columnas_a_agregar)
+            print(f"✅ Hoja expandida exitosamente (+{columnas_a_agregar} columnas)")
+        else:
+            print(f"Hoja '{ws.title}' ya tiene suficientes columnas ({current_cols} >= {columnas_necesarias})")
+            
+    except Exception as e:
+        print(f"❌ Error expandiendo hoja '{ws.title}': {e}")
+        # Re-lanzar la excepción para que el script falle si no puede expandir
+        raise e
+
+
 def escribir_jumbo_historico(
     ws_hist: gspread.Worksheet, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str
 ) -> None:
@@ -426,6 +466,9 @@ def escribir_jumbo_historico(
         values = [[""]]
     num_cols = max(len(r) for r in values) if values else 1
     new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
+
+    # ✅ EXPANDIR LA HOJA SI ES NECESARIO ANTES DE ESCRIBIR
+    expandir_hoja_si_necesario(ws_hist, new_col_idx)
 
     # Encabezado de fecha en la fila 1
     header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
