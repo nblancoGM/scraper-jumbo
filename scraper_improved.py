@@ -35,7 +35,7 @@ from selenium.webdriver.common.by import By  # type: ignore
 from selenium.webdriver.chrome.options import Options  # type: ignore
 from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
 from selenium.webdriver.support import expected_conditions as EC  # type: ignore
-from selenium.common.exceptions import TimeoutException, WebDriverException  # type: ignore
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException  # type: ignore
 
 # =========================
 # Configuración de hojas / columnas
@@ -58,8 +58,8 @@ COL_PESO_JUMBO_INFO = 5
 COL_SKU_PWEB = 2
 COL_JUMBO_KG_PWEB = 9  # Columna I
 
-SLEEP_MIN = 1.5  # Aumentado para dar más tiempo
-SLEEP_MAX = 3.0
+SLEEP_MIN = 2.0  # Aumentado para dar más tiempo
+SLEEP_MAX = 4.0
 
 # =========================
 # Autenticación Google
@@ -112,15 +112,17 @@ def extraer_precio_mejorado(texto: str) -> Optional[int]:
     
     texto_clean = texto.lower().strip()
     
-    # Palabras que invalidan el precio
+    # Palabras que invalidan el precio (pero NO "x kg" que es válido para precio/kg)
     palabras_excluir = {
         'antes', 'normal', 'precio normal', 'descuento', 'ahorro',
         'prime', 'suscríbete', 'membresía', 'gratis', 'envío',
         'despacho', 'retiro', 'tienda', 'stock'
     }
     
-    if any(palabra in texto_clean for palabra in palabras_excluir):
-        return None
+    # No excluir si contiene "x kg" ya que puede ser precio por kg
+    if not "x kg" in texto_clean:
+        if any(palabra in texto_clean for palabra in palabras_excluir):
+            return None
     
     for patron in patrones:
         matches = re.finditer(patron, texto, re.IGNORECASE)
@@ -138,12 +140,42 @@ def extraer_precio_mejorado(texto: str) -> Optional[int]:
     return None
 
 
+def extraer_precio_por_kg_jumbo_especifico(texto: str) -> Optional[int]:
+    """
+    Extrae precio por kg específicamente del formato de Jumbo.
+    Ejemplo: "1 un ($9.988 x kg)" -> 9988
+    """
+    if not texto:
+        return None
+    
+    # Patrón específico para el formato que mostraste
+    patron_jumbo = r'\(\$?([\d{1,3}\.]*\d{1,3})\s*x\s*kg\)'
+    
+    match = re.search(patron_jumbo, texto, re.IGNORECASE)
+    if match:
+        try:
+            valor_str = match.group(1).replace('.', '').replace(',', '').strip()
+            if valor_str.isdigit():
+                valor = int(valor_str)
+                if 500 <= valor <= 500000:  # Rango razonable para precio/kg
+                    return valor
+        except (ValueError, IndexError):
+            pass
+    
+    return None
+
+
 def extraer_precio_por_kg_mejorado(texto: str) -> Optional[int]:
     """Extrae precio por kg con patrones específicos para Chile."""
     if not texto:
         return None
     
-    # Patrones para precio por kg específicos de Chile
+    # Primero intentar con el formato específico de Jumbo
+    precio_jumbo = extraer_precio_por_kg_jumbo_especifico(texto)
+    if precio_jumbo:
+        return precio_jumbo
+    
+    # Patrones para precio por kg más generales
     patrones_kg = [
         r'\$\s*([\d{1,3}\.]*\d{1,3})\s*(?:/|por|x)\s*k?g',          # $7.990/kg, $7990 por kg
         r'([\d{1,3}\.]*\d{1,3})\s*/\s*k?g',                         # 7990/kg
@@ -222,155 +254,203 @@ def build_browser() -> webdriver.Chrome:
     return driver
 
 
-def esperar_contenido_dinamico(driver: webdriver.Chrome, timeout: int = 30) -> bool:
+def esperar_contenido_dinamico(driver: webdriver.Chrome, timeout: int = 45) -> bool:
     """Espera a que el contenido dinámico de Jumbo se cargue completamente."""
     try:
-        # Esperar múltiples indicadores de que la página se cargó
+        # Primero esperar que el documento esté completo
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+        
+        # Esperar un poco para que React/Vue/Angular cargue
+        time.sleep(3)
+        
+        # Esperar el selector específico que mencionaste
+        try:
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "span.text-sm.rounded-full.bg-grey"))
+            )
+            print("✓ Encontrado elemento con precio por kg (formato nuevo)")
+            return True
+        except TimeoutException:
+            pass
+        
+        # Intentar con otros selectores de precio
         conditions = [
-            # Esperar precios
-            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '$') or contains(text(), 'CLP')]")),
-            # Esperar contenido del producto
-            EC.presence_of_element_located((By.XPATH, "//*[contains(@class, 'price') or contains(@class, 'precio')]")),
-            # Esperar elementos con data attributes de precio
-            EC.presence_of_element_located((By.XPATH, "//*[contains(@data-testid, 'price') or contains(@data-qa, 'price')]")),
+            # El span específico de Jumbo
+            EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'bg-grey') and contains(text(), 'kg')]")),
+            # Otros elementos de precio
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '$')]")),
+            EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='price']")),
+            EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='precio']")),
         ]
         
-        # Intentar cada condición
         for condition in conditions:
             try:
                 WebDriverWait(driver, timeout // len(conditions)).until(condition)
                 return True
             except TimeoutException:
                 continue
-                
-        # Si no funcionó ninguna condición específica, esperar JavaScript
-        WebDriverWait(driver, 5).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
-        )
         
-        # Tiempo adicional para elementos dinámicos
-        time.sleep(3)
-        return True
+        # Esperar un poco más para elementos muy dinámicos
+        time.sleep(5)
         
-    except Exception:
+        # Verificar si hay algo de contenido
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        if len(body_text) > 500:  # Si hay bastante texto, probablemente cargó
+            return True
+            
+        return False
+        
+    except Exception as e:
+        print(f"Error esperando contenido: {e}")
         return False
 
 
 def encontrar_precios_jumbo(driver: webdriver.Chrome) -> Tuple[Optional[int], Optional[int]]:
     """Busca precios específicamente en la estructura de Jumbo Chile."""
     
-    # Selectores específicos para Jumbo Chile
-    selectores_precio = [
-        # Selectores de precio más específicos
-        "[data-testid*='price']",
-        "[data-qa*='price']", 
-        "[class*='price']",
-        "[class*='precio']",
-        "[class*='valor']",
-        "[data-price]",
-        ".vtex-product-price",
-        ".vtex-store-components",
-        ".product-price",
-        ".selling-price",
-        ".best-price",
-        ".current-price",
-        ".price-current",
-        ".price-value",
-        # Selectores más generales
-        "span[class*='price']",
-        "div[class*='price']",
-        "p[class*='price']",
-        "span[class*='precio']",
-        "div[class*='precio']",
-        # Elementos que contengan símbolo de peso
-        "span:contains('$')",
-        "div:contains('$')",
-        "p:contains('$')",
-    ]
-    
-    textos_encontrados = []
-    
-    # Buscar con JavaScript también
-    try:
-        js_prices = driver.execute_script("""
-            var prices = [];
-            var elements = document.querySelectorAll('*');
-            for (var i = 0; i < elements.length; i++) {
-                var text = elements[i].textContent || elements[i].innerText || '';
-                if (text.includes('$') || text.includes('CLP') || text.includes('precio')) {
-                    prices.push(text.trim());
-                }
-            }
-            return prices.slice(0, 50); // Limitar resultados
-        """)
-        textos_encontrados.extend(js_prices)
-    except Exception as e:
-        print(f"Error ejecutando JS: {e}")
-    
-    # Buscar con selectores CSS
-    for selector in selectores_precio:
-        try:
-            elementos = driver.find_elements(By.CSS_SELECTOR, selector)
-            for elem in elementos[:10]:  # Limitar por selector
-                try:
-                    texto = elem.text.strip()
-                    if texto and ('$' in texto or 'CLP' in texto.upper()):
-                        textos_encontrados.append(texto)
-                    
-                    # También revisar atributos
-                    for attr in ['data-price', 'data-value', 'title', 'aria-label']:
-                        attr_value = elem.get_attribute(attr)
-                        if attr_value and ('$' in attr_value or 'CLP' in attr_value.upper()):
-                            textos_encontrados.append(attr_value)
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    
-    # También buscar en el texto completo de la página
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        # Buscar patrones de precio en todo el texto
-        price_patterns = re.findall(r'\$[\s\d.,]+|\d+[\s.,]*CLP', body_text, re.IGNORECASE)
-        textos_encontrados.extend(price_patterns[:20])
-    except Exception:
-        pass
-    
     precio_unitario: Optional[int] = None
     precio_kg: Optional[int] = None
     
-    print(f"Textos encontrados para análisis: {len(textos_encontrados)}")
+    # 1. Buscar primero el span específico con precio por kg que mencionaste
+    try:
+        # Selector específico para el formato: <span class="text-sm rounded-full bg-grey px-3 font-normal text-black mb-4">1 un ($9.988 x kg)</span>
+        elementos_kg = driver.find_elements(By.CSS_SELECTOR, "span.text-sm.rounded-full.bg-grey")
+        for elem in elementos_kg:
+            try:
+                texto = elem.text.strip()
+                print(f"Analizando span bg-grey: '{texto}'")
+                if "x kg" in texto.lower():
+                    pk = extraer_precio_por_kg_jumbo_especifico(texto)
+                    if pk:
+                        precio_kg = pk
+                        print(f"✓ Precio/kg encontrado en span específico: ${pk}")
+                        break
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"No se encontraron spans con bg-grey: {e}")
     
-    # Analizar textos encontrados
-    for texto in textos_encontrados:
-        if not texto or len(texto.strip()) == 0:
-            continue
+    # 2. Si no encontramos precio/kg, buscar con selectores más amplios
+    if precio_kg is None:
+        selectores_precio = [
+            # Selectores más específicos primero
+            "span.bg-grey",
+            "span[class*='grey']",
+            "[data-testid*='price']",
+            "[data-qa*='price']",
+            ".product-price",
+            ".selling-price",
+            ".best-price",
+            ".current-price",
+            # Selectores más generales
+            "span",
+            "div[class*='price']",
+            "p[class*='price']",
+        ]
+        
+        textos_encontrados = []
+        
+        for selector in selectores_precio[:5]:  # Limitar a los primeros selectores más específicos
+            try:
+                elementos = driver.find_elements(By.CSS_SELECTOR, selector)
+                for elem in elementos[:20]:  # Limitar elementos por selector
+                    try:
+                        texto = elem.text.strip()
+                        if texto and len(texto) < 200:  # Evitar textos muy largos
+                            textos_encontrados.append(texto)
+                            # También obtener atributos
+                            for attr in ['data-price', 'data-value', 'title', 'aria-label']:
+                                attr_value = elem.get_attribute(attr)
+                                if attr_value and len(attr_value) < 200:
+                                    textos_encontrados.append(attr_value)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        
+        # 3. Buscar con XPath para encontrar elementos con $ o "kg"
+        try:
+            elementos_precio = driver.find_elements(By.XPATH, "//*[contains(text(), '$') or contains(text(), ' kg')]")
+            for elem in elementos_precio[:30]:
+                try:
+                    texto = elem.text.strip()
+                    if texto and len(texto) < 200 and ('$' in texto or 'kg' in texto.lower()):
+                        textos_encontrados.append(texto)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        # 4. Ejecutar JavaScript para buscar precios
+        try:
+            js_prices = driver.execute_script("""
+                var prices = [];
+                // Buscar spans con la clase específica
+                var spans = document.querySelectorAll('span.bg-grey, span[class*="grey"]');
+                spans.forEach(function(span) {
+                    if (span.textContent && span.textContent.includes('kg')) {
+                        prices.push(span.textContent.trim());
+                    }
+                });
+                // Buscar otros elementos con precios
+                var allElements = document.querySelectorAll('*');
+                for (var i = 0; i < Math.min(allElements.length, 1000); i++) {
+                    var text = allElements[i].textContent || '';
+                    if (text.length < 200 && (text.includes('$') || text.includes('kg'))) {
+                        // Verificar que no sea un script
+                        if (allElements[i].tagName !== 'SCRIPT' && allElements[i].tagName !== 'STYLE') {
+                            prices.push(text.trim());
+                        }
+                    }
+                }
+                return prices.slice(0, 100);
+            """)
+            if js_prices:
+                textos_encontrados.extend(js_prices)
+        except Exception as e:
+            print(f"Error ejecutando JS: {e}")
+        
+        print(f"Total textos encontrados para análisis: {len(textos_encontrados)}")
+        
+        # Analizar todos los textos encontrados
+        textos_unicos = list(set(textos_encontrados))  # Eliminar duplicados
+        
+        for texto in textos_unicos:
+            if not texto or len(texto.strip()) == 0:
+                continue
             
-        texto_clean = normaliza(texto)
-        print(f"Analizando: '{texto_clean[:100]}'")
-        
-        # Primero buscar precio por kg
-        if precio_kg is None:
-            pk = extraer_precio_por_kg_mejorado(texto_clean)
-            if pk is not None:
-                precio_kg = pk
-                print(f"Precio/kg encontrado: ${pk}")
-        
-        # Luego buscar precio unitario
-        if precio_unitario is None:
-            pu = extraer_precio_mejorado(texto_clean)
-            if pu is not None:
-                precio_unitario = pu
-                print(f"Precio unitario encontrado: ${pu}")
-        
-        # Si tenemos ambos, podemos parar
-        if precio_unitario is not None and precio_kg is not None:
-            break
+            # Ignorar scripts y estilos
+            if "function(" in texto or "window." in texto or "{" in texto:
+                continue
+                
+            texto_clean = normaliza(texto)
+            
+            # Buscar precio por kg primero
+            if precio_kg is None and "kg" in texto_clean.lower():
+                pk = extraer_precio_por_kg_mejorado(texto_clean)
+                if pk:
+                    precio_kg = pk
+                    print(f"✓ Precio/kg encontrado: ${pk} en texto: '{texto_clean[:50]}'")
+            
+            # Buscar precio unitario
+            if precio_unitario is None and "$" in texto_clean:
+                # No extraer precio si tiene "x kg" porque es precio por kg
+                if "x kg" not in texto_clean.lower():
+                    pu = extraer_precio_mejorado(texto_clean)
+                    if pu:
+                        precio_unitario = pu
+                        print(f"✓ Precio unitario encontrado: ${pu} en texto: '{texto_clean[:50]}'")
+            
+            # Si tenemos ambos, podemos parar
+            if precio_unitario is not None and precio_kg is not None:
+                break
     
     return precio_unitario, precio_kg
 
 
-def obtener_precios_jumbo(url: str, driver: webdriver.Chrome, timeout_s: int = 45, retries: int = 3) -> Tuple[Optional[int], Optional[int], str]:
+def obtener_precios_jumbo(url: str, driver: webdriver.Chrome, timeout_s: int = 60, retries: int = 3) -> Tuple[Optional[int], Optional[int], str]:
     """Navega a una URL de Jumbo Chile y extrae precios con estrategia mejorada."""
     
     print(f"Navegando a: {url}")
@@ -378,20 +458,31 @@ def obtener_precios_jumbo(url: str, driver: webdriver.Chrome, timeout_s: int = 4
     
     for intento in range(1, retries + 1):
         try:
+            print(f"Intento {intento}/{retries}")
+            
             # Navegar a la URL
             driver.get(url)
             
             # Esperar que la página cargue completamente
             if not esperar_contenido_dinamico(driver, timeout_s):
-                print(f"Timeout esperando contenido dinámico (intento {intento})")
+                print(f"⚠️ Timeout esperando contenido dinámico (intento {intento})")
                 last_err = "timeout_contenido_dinamico"
-                continue
-            
-            # Scroll para activar lazy loading
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-            time.sleep(2)
-            driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(2)
+                
+                # Intentar hacer scroll de todas formas
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight*2/3);")
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(2)
+            else:
+                # Scroll para activar lazy loading
+                driver.execute_script("window.scrollTo(0, 300);")
+                time.sleep(1)
+                driver.execute_script("window.scrollTo(0, 600);")
+                time.sleep(1)
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(1)
             
             # Buscar precios
             precio_unit, precio_kg = encontrar_precios_jumbo(driver)
@@ -400,21 +491,24 @@ def obtener_precios_jumbo(url: str, driver: webdriver.Chrome, timeout_s: int = 4
                 return precio_unit, precio_kg, "ok"
             else:
                 last_err = "precio_no_encontrado"
-                print(f"No se encontraron precios (intento {intento})")
+                print(f"⚠️ No se encontraron precios (intento {intento})")
+                
+                # Intentar tomar screenshot para debug (solo en desarrollo)
+                # driver.save_screenshot(f"debug_intento_{intento}.png")
                 
         except TimeoutException:
             last_err = "timeout_navegacion"
-            print(f"Timeout de navegación (intento {intento})")
+            print(f"⚠️ Timeout de navegación (intento {intento})")
         except WebDriverException as e:
             last_err = f"webdriver_error:{type(e).__name__}"
-            print(f"Error WebDriver (intento {intento}): {e}")
+            print(f"⚠️ Error WebDriver (intento {intento}): {e}")
         except Exception as e:
             last_err = f"error_general:{type(e).__name__}"
-            print(f"Error general (intento {intento}): {e}")
+            print(f"⚠️ Error general (intento {intento}): {e}")
         
         # Espera progresivamente más larga entre intentos
         if intento < retries:
-            wait_time = 2 * intento
+            wait_time = 3 * intento
             print(f"Esperando {wait_time}s antes del siguiente intento...")
             time.sleep(wait_time)
     
@@ -507,6 +601,7 @@ def escribir_pweb(ws_pweb: gspread.Worksheet, dict_sku_precio_kg: Dict[str, Opti
 
 def main() -> None:
     print("🚀 Iniciando scraper de Jumbo Chile - Solo P-web")
+    print("   Versión mejorada con selectores específicos para Jumbo")
     
     sh = open_sheet()
     ws_pweb = sh.worksheet(SHEET_PWEB)
@@ -530,7 +625,8 @@ def main() -> None:
             url = item.get("URL")
             peso_j = item.get("PesoJumbo_g")
 
-            print(f"\n🔍 [{i}/{len(productos)}] Procesando SKU: {sku}")
+            print(f"\n{'='*60}")
+            print(f"🔍 [{i}/{len(productos)}] Procesando SKU: {sku}")
 
             if not sku or not url:
                 dict_sku_precio_kg_jumbo[sku] = None
@@ -563,7 +659,7 @@ def main() -> None:
 
             # Progreso cada 10 productos
             if i % 10 == 0:
-                print(f"📈 Progreso: {i}/{len(productos)} | Exitosos: {procesados_exitosos} | Fallos: {fallos}")
+                print(f"\n📈 Progreso: {i}/{len(productos)} | Exitosos: {procesados_exitosos} | Fallos: {fallos}")
             
             # Sleep entre requests
             time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
@@ -576,7 +672,8 @@ def main() -> None:
         driver.quit()
 
     # Actualizar P-web
-    print(f"\n📝 Actualizando hoja P-web...")
+    print(f"\n{'='*60}")
+    print(f"📝 Actualizando hoja P-web...")
     escribir_pweb(ws_pweb, dict_sku_precio_kg_jumbo)
 
     # Métricas finales
