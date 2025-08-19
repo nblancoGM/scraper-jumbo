@@ -1,16 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Scraper para obtener el precio y el precio por kilo desde Jumbo y
-actualizar una planilla de Google Sheets.
+Scraper para obtener el precio por kilo desde Jumbo y
+actualizar únicamente la columna I (Jumbo Kg) de la hoja P-web.
 
-El objetivo de este script es mejorar la extracción del «precio por kg».
-La versión original calculaba este valor dividiendo el precio unitario
-por el peso proporcionado en la hoja «Jumbo-info».  Ese enfoque no
-siempre funcionaba cuando la página de Jumbo mostraba el precio por kilo
-de manera explícita (por ejemplo, dentro de paréntesis o utilizando
-formatos como “$7.990/kg” o “$16.990 x kg”).  Esta versión trata de
-extraer directamente ese valor del DOM.  Si no logra encontrarlo,
-recurrirá al cálculo clásico usando el peso.
+El script busca el precio por kg directamente del DOM de Jumbo.
+Si no lo encuentra explícitamente, calcula el precio por kg
+dividiendo el precio unitario por el peso proporcionado en Jumbo-info.
 
 Variables de entorno necesarias:
 
@@ -19,11 +14,6 @@ Variables de entorno necesarias:
   permite escribir en la hoja de cálculo.
 * ``CHROME_BIN`` – opcional; ruta al binario de Chrome si se quiere
   usar una versión específica.
-
-Para ejecutar el script de manera periódica (por ejemplo, cada lunes),
-basta con programar un cron o job en la plataforma de preferencia que
-ejecute ``python scraper.py``.  Durante el desarrollo se puede lanzar
-manual o directamente desde una terminal.
 """
 
 from __future__ import annotations
@@ -36,8 +26,6 @@ import random
 import uuid
 import tempfile
 from typing import Optional, Tuple, List, Dict, Any
-from datetime import datetime
-from dateutil import tz
 
 import gspread  # type: ignore
 from google.oauth2.service_account import Credentials  # type: ignore
@@ -59,22 +47,15 @@ if not SHEET_ID:
 # Nombres de las hojas
 SHEET_JUMBO_INFO = "Jumbo-info"
 SHEET_PWEB = "P-web"
-SHEET_JUMBO_HIST = "Jumbo"
 
-# Jumbo-info: B=SKU, D=URL, E=Peso Jumbo (g), F=Precio GM, G=Peso GM
+# Jumbo-info: B=SKU, D=URL, E=Peso Jumbo (g)
 COL_SKU_INFO = 2
 COL_URL_INFO = 4
 COL_PESO_JUMBO_INFO = 5
-COL_PRECIO_GM_INFO = 6
-COL_PESO_GM_INFO = 7
 
 # P-web: B=SKU, I="Jumbo Kg"
 COL_SKU_PWEB = 2
 COL_JUMBO_KG_PWEB = 9  # Columna I
-
-# Jumbo (histórico): B=SKU, columnas de fechas a partir de C
-COL_SKU_HIST = 2
-COL_FECHAS_INICIA_EN = 3  # Columna C
 
 SLEEP_MIN = 0.6
 SLEEP_MAX = 1.2
@@ -334,9 +315,9 @@ def obtener_precios(url: str, driver: webdriver.Chrome, timeout_s: int = 15, ret
 def leer_jumbo_info(sh: gspread.Spreadsheet) -> List[Dict[str, Any]]:
     """Lee todas las filas de la hoja «Jumbo-info» y devuelve una lista de dicts.
 
-    Cada diccionario contiene las claves ``row_index``, ``SKU``, ``URL``,
-    ``PesoJumbo_g``, ``PrecioGM`` y ``PesoGM_g``.  Los valores que no se
-    puedan convertir a número quedan como ``None``.
+    Cada diccionario contiene las claves ``row_index``, ``SKU``, ``URL`` y
+    ``PesoJumbo_g``. Los valores que no se puedan convertir a número quedan
+    como ``None``.
     """
     ws = sh.worksheet(SHEET_JUMBO_INFO)
     values = ws.get_all_values()
@@ -347,14 +328,12 @@ def leer_jumbo_info(sh: gspread.Spreadsheet) -> List[Dict[str, Any]]:
     for r in range(2, len(values) + 1):
         row = values[r - 1]
         # Asegurarse de que haya suficientes columnas
-        while len(row) < 7:
+        while len(row) < 5:
             row.append("")
 
         sku = str(row[COL_SKU_INFO - 1]).strip()
         url = str(row[COL_URL_INFO - 1]).strip()
         peso_j = row[COL_PESO_JUMBO_INFO - 1]
-        precio_gm = row[COL_PRECIO_GM_INFO - 1]
-        peso_gm = row[COL_PESO_GM_INFO - 1]
 
         def to_num(x: Any) -> Optional[float]:
             try:
@@ -369,8 +348,6 @@ def leer_jumbo_info(sh: gspread.Spreadsheet) -> List[Dict[str, Any]]:
                 "SKU": sku,
                 "URL": url,
                 "PesoJumbo_g": to_num(peso_j),
-                "PrecioGM": to_num(precio_gm),
-                "PesoGM_g": to_num(peso_gm),
             }
         )
     return rows
@@ -410,69 +387,13 @@ def escribir_pweb(ws_pweb: gspread.Worksheet, dict_sku_precio_kg: Dict[str, Opti
         ws_pweb.batch_update(updates)
 
 
-def escribir_jumbo_historico(
-    ws_hist: gspread.Worksheet, dict_sku_precio_kg: Dict[str, Optional[int]], fecha_str: str
-) -> None:
-    """Agrega una nueva columna en la hoja "Jumbo" con la fecha y escribe los valores.
-
-    Si un SKU no existe en la hoja histórica, se agrega al final (columna B).
-    Las celdas con ``None`` se dejan en blanco.
-    """
-    sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
-
-    # Determinar la próxima columna disponible (>= C)
-    values = ws_hist.get_all_values()
-    if not values:
-        values = [[""]]
-    num_cols = max(len(r) for r in values) if values else 1
-    new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
-
-    # Encabezado de fecha en la fila 1
-    header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
-    ws_hist.batch_update([{"range": header_a1, "values": [[fecha_str]]}])
-
-    # Agregar SKUs que no existan
-    to_append: List[List[Any]] = []
-    for sku in dict_sku_precio_kg.keys():
-        if sku and sku not in sku_to_row:
-            to_append.append(["", sku])  # col A vacío, col B = SKU
-    if to_append:
-        ws_hist.append_rows(to_append, value_input_option="RAW")
-        sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
-
-    # Escribir valores en la nueva columna
-    updates: List[Dict[str, Any]] = []
-    for sku, val in dict_sku_precio_kg.items():
-        r = sku_to_row.get(sku)
-        if not r or r == 1:
-            continue
-        a1 = f"{col_idx_to_letter(new_col_idx)}{r}"
-        updates.append({"range": a1, "values": [["" if val is None else val]]})
-    if updates:
-        ws_hist.batch_update(updates)
-
-
-def col_idx_to_letter(idx: int) -> str:
-    """Convierte un índice de columna (1‑based) a la letra utilizada en A1."""
-    letters = ""
-    while idx > 0:
-        idx, rem = divmod(idx - 1, 26)
-        letters = chr(65 + rem) + letters
-    return letters
-
-
 # =========================
 # Flujo principal
 # =========================
 
 def main() -> None:
-    # Fecha local America/Santiago
-    tz_scl = tz.gettz("America/Santiago")
-    fecha_str = datetime.now(tz_scl).strftime("%d-%m-%Y")
-
     sh = open_sheet()
     ws_pweb = sh.worksheet(SHEET_PWEB)
-    ws_hist = sh.worksheet(SHEET_JUMBO_HIST)
 
     productos = leer_jumbo_info(sh)
     if not productos:
@@ -498,10 +419,15 @@ def main() -> None:
             if precio_kg_encontrado is not None:
                 # Si encontramos el precio por kg directamente de la página lo usamos.
                 dict_sku_precio_kg_jumbo[sku] = precio_kg_encontrado
+                print(f"SKU {sku}: Precio/kg encontrado directamente: ${precio_kg_encontrado}")
             else:
                 # Si no, calculamos usando el peso proporcionado.
                 valor = precio_por_kg(precio_unit, peso_j)
                 dict_sku_precio_kg_jumbo[sku] = valor
+                if valor:
+                    print(f"SKU {sku}: Precio/kg calculado: ${valor}")
+                else:
+                    print(f"SKU {sku}: No se pudo obtener precio/kg")
 
             if i % 10 == 0:
                 print(f"Procesados {i}/{len(productos)}")
@@ -509,13 +435,9 @@ def main() -> None:
     finally:
         driver.quit()
 
-    # 1) Actualizar P-web (columna I), sin pisar valores cuando no hay nuevo
+    # Actualizar P-web (columna I), sin pisar valores cuando no hay nuevo
     escribir_pweb(ws_pweb, dict_sku_precio_kg_jumbo)
     print("P-web actualizado (columna I / Jumbo Kg).")
-
-    # 2) Actualizar Jumbo (histórico) agregando una nueva columna con la fecha
-    escribir_jumbo_historico(ws_hist, dict_sku_precio_kg_jumbo, fecha_str)
-    print(f"Jumbo histórico actualizado ({fecha_str}).")
 
     # Métricas
     total = len(dict_sku_precio_kg_jumbo)
