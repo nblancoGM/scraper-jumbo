@@ -420,18 +420,12 @@ def escribir_jumbo_historico(
     """
     sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
-    # --- INICIO DE LA CORRECCIÓN ---
-    # Determinar la próxima columna disponible basándose en la fila de encabezados (fila 1).
-    # Este método es más robusto que analizar todas las celdas de la hoja.
-    try:
-        header_row = ws_hist.row_values(1)
-        num_cols = len(header_row)
-    except gspread.exceptions.APIError:
-        # En caso de que la hoja esté completamente vacía y no se pueda leer la fila 1.
-        num_cols = 0
-    
-    new_col_idx = num_cols + 1
-    # --- FIN DE LA CORRECCIÓN ---
+    # Determinar la próxima columna disponible (>= C)
+    values = ws_hist.get_all_values()
+    if not values:
+        values = [[""]]
+    num_cols = max(len(r) for r in values) if values else 1
+    new_col_idx = num_cols + 1 if num_cols >= COL_FECHAS_INICIA_EN else COL_FECHAS_INICIA_EN
 
     # Encabezado de fecha en la fila 1
     header_a1 = f"{col_idx_to_letter(new_col_idx)}1"
@@ -439,15 +433,11 @@ def escribir_jumbo_historico(
 
     # Agregar SKUs que no existan
     to_append: List[List[Any]] = []
-    # Usamos una copia del diccionario de mapeo para no modificarlo mientras iteramos
-    current_skus_in_sheet = set(sku_to_row.keys())
     for sku in dict_sku_precio_kg.keys():
-        if sku and sku not in current_skus_in_sheet:
+        if sku and sku not in sku_to_row:
             to_append.append(["", sku])  # col A vacío, col B = SKU
-            
     if to_append:
         ws_hist.append_rows(to_append, value_input_option="RAW")
-        # Si agregamos filas, debemos actualizar nuestro mapeo de SKUs a filas
         sku_to_row = mapear_sku_a_fila(ws_hist, COL_SKU_HIST)
 
     # Escribir valores en la nueva columna
