@@ -57,3 +57,10 @@ jobs:
             exit 1
           fi
           python scraper_improved.py
+
+      - name: Guardar screenshots de depuración
+        if: always() # Esto hace que se ejecute incluso si el paso anterior falla
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-depuracion
+          path: "*.png" # Sube cualquier archivo .png que encuentre
